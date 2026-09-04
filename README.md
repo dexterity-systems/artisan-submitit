@@ -41,7 +41,8 @@ its built-in local runner.
 ## Requirements
 
 - Python 3.12 or newer;
-- an Artisan release containing `artisan.orchestration.runner_api`;
+- `dexterity-artisan` 0.1.2a6.dev0 or newer, which provides
+  `artisan.orchestration.runner_api`;
 - Submitit 1.5 or newer;
 - a shared filesystem visible at the same paths from the pipeline manager and
   workers; and

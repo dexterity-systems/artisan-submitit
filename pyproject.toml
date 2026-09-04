@@ -22,7 +22,7 @@ classifiers = [
 ]
 dependencies = [
     "cloudpickle>=3,<4",
-    "dexterity-artisan",
+    "dexterity-artisan>=0.1.2a6.dev0",
     "submitit>=1.5,<2",
 ]
 
