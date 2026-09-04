@@ -14,8 +14,66 @@ from pathlib import Path
 
 DEFAULT_MAX_ARRAY_SIZE = 1000
 MAX_LOG_BYTES = 100_000
+MANAGED_SCHEDULER_OPTION_NAMES = frozenset(
+    {
+        "cpus-per-gpu",
+        "cpus-per-task",
+        "gpus",
+        "gpus-per-node",
+        "gpus-per-task",
+        "gres",
+        "mem",
+        "mem-per-cpu",
+        "mem-per-gpu",
+        "nodes",
+        "ntasks",
+        "ntasks-per-core",
+        "ntasks-per-gpu",
+        "ntasks-per-node",
+        "time",
+    }
+)
+_MANAGED_SCHEDULER_SHORT_OPTIONS = frozenset({"-G", "-N", "-c", "-n", "-t"})
 
 logger = logging.getLogger(__name__)
+
+
+def reject_managed_scheduler_arguments(
+    arguments: object,
+    parameter_name: str,
+) -> None:
+    """Reject CLI arguments that override Artisan-owned scheduling policy.
+
+    Args:
+        arguments: Scheduler CLI arguments to validate.
+        parameter_name: User-facing configuration name for error messages.
+
+    Raises:
+        TypeError: If arguments are not a sequence of strings.
+        ValueError: If an argument overrides task topology or portable resources.
+    """
+    if isinstance(arguments, (str, bytes)) or not isinstance(arguments, Sequence):
+        msg = f"{parameter_name} must be a sequence of strings"
+        raise TypeError(msg)
+    for argument in arguments:
+        if not isinstance(argument, str):
+            msg = f"{parameter_name} must be a sequence of strings"
+            raise TypeError(msg)
+        option = _scheduler_option_name(argument)
+        if option in MANAGED_SCHEDULER_OPTION_NAMES or (
+            len(argument) >= 2 and argument[:2] in _MANAGED_SCHEDULER_SHORT_OPTIONS
+        ):
+            msg = (
+                f"{parameter_name} cannot override Artisan-managed option {argument!r}"
+            )
+            raise ValueError(msg)
+
+
+def _scheduler_option_name(argument: str) -> str | None:
+    """Return a normalized long scheduler option name, when present."""
+    if not argument.startswith("--"):
+        return None
+    return argument[2:].split("=", maxsplit=1)[0].replace("_", "-").lower()
 
 
 def parse_time_to_minutes(value: str) -> int:

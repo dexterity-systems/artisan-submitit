@@ -26,17 +26,45 @@ from artisan.orchestration.runner_api import (
 )
 
 from artisan_submitit.utils import (
+    MANAGED_SCHEDULER_OPTION_NAMES,
     chunked,
     get_cluster_max_array_size,
     parse_time_to_minutes,
     read_job_logs,
+    reject_managed_scheduler_arguments,
 )
 
 logger = logging.getLogger(__name__)
 
 _PORTABLE_PARAMETER_NAMES = frozenset(
-    {"cpus_per_task", "gpus_per_node", "mem_gb", "timeout_min"}
+    {
+        "cpus_per_task",
+        "gpus_per_node",
+        "mem_gb",
+        "slurm_cpus_per_gpu",
+        "slurm_cpus_per_task",
+        "slurm_gpus_per_node",
+        "slurm_gpus_per_task",
+        "slurm_mem",
+        "slurm_mem_gb",
+        "slurm_mem_per_cpu",
+        "slurm_mem_per_gpu",
+        "slurm_num_gpus",
+        "slurm_time",
+        "slurm_timeout_min",
+        "timeout_min",
+    }
 )
+_TOPOLOGY_PARAMETER_NAMES = frozenset(
+    {
+        "nodes",
+        "slurm_nodes",
+        "slurm_ntasks_per_node",
+        "slurm_tasks_per_node",
+        "tasks_per_node",
+    }
+)
+_MANAGED_ADDITIONAL_PARAMETER_NAMES = MANAGED_SCHEDULER_OPTION_NAMES | {"array"}
 _REMOVED_PARAMETER_NAMES = {
     "partition": "slurm_partition",
     "time_limit": "RunnerResources.time_limit",
@@ -81,17 +109,8 @@ class SlurmLifecycleRouter(LifecycleRouter):
         units: list[ExecutionUnit],
         runtime_env: RuntimeEnvironment,
     ) -> None:
-        """Submit packed units, chunking arrays at the scheduler limit."""
-        try:
-            batches = pack_units(units, self._units_per_worker)
-            for array_batches in chunked(batches, self._max_array_size):
-                self._submit_array(array_batches, runtime_env)
-        except Exception as exc:
-            self.cancel()
-            failures = failure_results_for_units(units, exc)
-            self._start_background(lambda: failures)
-            return
-        self._start_background(self._collect_submitted)
+        """Start asynchronous scheduler submission and collection."""
+        self._start_background(lambda: self._run_waves(units, runtime_env))
 
     def cancel(self) -> None:
         """Cancel only jobs submitted by this router; safe to call repeatedly."""
@@ -110,26 +129,59 @@ class SlurmLifecycleRouter(LifecycleRouter):
             except Exception:
                 with self._lock:
                     self._cancelled_handles.discard(id(job))
-                logger.debug("Failed to cancel SLURM job %s", job.job_id, exc_info=True)
+                logger.debug("Failed to cancel an owned SLURM job", exc_info=True)
+
+    def _run_waves(
+        self,
+        units: list[ExecutionUnit],
+        runtime_env: RuntimeEnvironment,
+    ) -> list[UnitResult]:
+        """Submit and collect one scheduler-sized wave at a time."""
+        try:
+            batches = pack_units(units, self._units_per_worker)
+            waves = chunked(batches, self._max_array_size)
+        except Exception as exc:
+            return failure_results_for_units(units, exc)
+
+        results: list[UnitResult] = []
+        for index, wave in enumerate(waves):
+            if self._cancelled.is_set():
+                results.extend(
+                    _failure_results_for_waves(
+                        waves[index:], "SLURM dispatch cancelled before submission"
+                    )
+                )
+                break
+            try:
+                submitted = self._submit_array(wave, runtime_env)
+            except Exception as exc:
+                results.extend(_failure_results_for_waves(waves[index:], exc))
+                break
+            results.extend(self._collect_submitted(submitted))
+        return results
 
     def _submit_array(
         self,
         batches: list[list[ExecutionUnit]],
         runtime_env: RuntimeEnvironment,
-    ) -> None:
+    ) -> list[_SubmittedBatch]:
         """Submit one scheduler-sized array and retain every exact handle."""
+        pending: list[_SubmittedBatch] = []
         with self._executor.batch():
             for batch in batches:
                 job = self._executor.submit(execute_unit_batch, batch, runtime_env)
-                with self._lock:
-                    self._submitted.append(_SubmittedBatch(job=job, units=batch))
+                pending.append(_SubmittedBatch(job=job, units=batch))
+        with self._lock:
+            self._submitted.extend(pending)
         if self._cancelled.is_set():
             self.cancel()
+        return pending
 
-    def _collect_submitted(self) -> list[UnitResult]:
+    def _collect_submitted(
+        self,
+        submitted: list[_SubmittedBatch],
+    ) -> list[UnitResult]:
         """Collect batches in submission order and attach their exact job logs."""
-        with self._lock:
-            submitted = list(self._submitted)
         results: list[UnitResult] = []
         for item in submitted:
             try:
@@ -293,6 +345,42 @@ def _validate_provider_parameters(parameters: dict[str, Any]) -> None:
         names = ", ".join(sorted(duplicate))
         msg = f"Configure portable resources through RunnerResources, not: {names}"
         raise ValueError(msg)
+    topology = _TOPOLOGY_PARAMETER_NAMES & parameters.keys()
+    if topology:
+        names = ", ".join(sorted(topology))
+        msg = f"Artisan Submitit jobs require one task; unsupported options: {names}"
+        raise ValueError(msg)
+    srun_arguments = parameters.get("slurm_srun_args")
+    if srun_arguments is not None:
+        reject_managed_scheduler_arguments(srun_arguments, "slurm_srun_args")
+    _validate_additional_parameters(parameters.get("slurm_additional_parameters"))
+
+
+def _validate_additional_parameters(value: object) -> None:
+    """Reject hidden topology and portable-resource overrides."""
+    if value is None:
+        return
+    if not isinstance(value, dict) or not all(isinstance(key, str) for key in value):
+        msg = "slurm_additional_parameters must be a dict with string keys"
+        raise TypeError(msg)
+    normalized = {key.lstrip("-").replace("_", "-").lower() for key in value}
+    managed = normalized & _MANAGED_ADDITIONAL_PARAMETER_NAMES
+    if managed:
+        names = ", ".join(sorted(managed))
+        msg = (
+            "slurm_additional_parameters cannot override Artisan-managed "
+            f"options: {names}"
+        )
+        raise ValueError(msg)
+
+
+def _failure_results_for_waves(
+    waves: list[list[list[ExecutionUnit]]],
+    error: BaseException | str,
+) -> list[UnitResult]:
+    """Return aligned failures for scheduler waves not successfully submitted."""
+    units = [unit for wave in waves for batch in wave for unit in batch]
+    return failure_results_for_units(units, error)
 
 
 def _read_submitit_job_log(job: submitit.Job[Any]) -> str | None:

@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import contextlib
+import threading
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
+import submitit
 from artisan.orchestration.runner_api import (
     BatchStrategy,
     RunnerResources,
@@ -91,6 +94,92 @@ class TestSlurmRunner:
         with pytest.raises(ValueError, match="Submitit-native"):
             SlurmRunner(**{alias: "bad"})
 
+    @pytest.mark.parametrize(
+        "parameter",
+        [
+            "nodes",
+            "tasks_per_node",
+            "slurm_nodes",
+            "slurm_tasks_per_node",
+            "slurm_ntasks_per_node",
+        ],
+    )
+    def test_multi_rank_topology_fails_fast(self, parameter: str) -> None:
+        with pytest.raises(ValueError, match="one task"):
+            SlurmRunner(**{parameter: 2})
+
+    @pytest.mark.parametrize(
+        "parameter",
+        [
+            "slurm_cpus_per_task",
+            "slurm_cpus_per_gpu",
+            "slurm_gpus_per_node",
+            "slurm_gpus_per_task",
+            "slurm_num_gpus",
+            "slurm_mem",
+            "slurm_mem_gb",
+            "slurm_mem_per_cpu",
+            "slurm_mem_per_gpu",
+            "slurm_time",
+            "slurm_timeout_min",
+        ],
+    )
+    def test_prefixed_portable_resource_override_fails_fast(
+        self, parameter: str
+    ) -> None:
+        with pytest.raises(ValueError, match="RunnerResources"):
+            SlurmRunner(**{parameter: 2})
+
+    @pytest.mark.parametrize(
+        "arguments",
+        [
+            ["--ntasks=2"],
+            ["--nodes", "2"],
+            ["-n2"],
+            ["--cpus-per-task", "8"],
+            ["-c8"],
+            ["--mem=8G"],
+            ["--gres", "gpu:2"],
+            ["-G2"],
+            ["--time=01:00:00"],
+            ["-t60"],
+        ],
+    )
+    def test_managed_slurm_srun_argument_fails_fast(self, arguments: list[str]) -> None:
+        with pytest.raises(ValueError, match="Artisan-managed"):
+            SlurmRunner(slurm_srun_args=arguments)
+
+    @pytest.mark.parametrize(
+        "parameters",
+        [
+            {"array": "0-3"},
+            {"nodes": 2},
+            {"ntasks_per_node": 2},
+            {"cpus-per-task": 8},
+            {"mem": "8G"},
+            {"gres": "gpu:2"},
+            {"time": 60},
+        ],
+    )
+    def test_managed_additional_parameter_fails_fast(
+        self, parameters: dict[str, object]
+    ) -> None:
+        with pytest.raises(ValueError, match="Artisan-managed"):
+            SlurmRunner(slurm_additional_parameters=parameters)
+
+    def test_unmanaged_native_parameters_remain_available(self) -> None:
+        runner = SlurmRunner(
+            slurm_srun_args=["--export=ALL", "--exclusive"],
+            slurm_additional_parameters={"mail-type": "FAIL"},
+        )
+
+        parameters = runner._executor_parameters(
+            RunnerResources(), BatchStrategy(), 0, "op"
+        )
+
+        assert parameters["slurm_srun_args"] == ["--export=ALL", "--exclusive"]
+        assert parameters["slurm_additional_parameters"] == {"mail-type": "FAIL"}
+
     @patch("artisan_submitit.slurm.get_cluster_max_array_size", return_value=100)
     @patch("artisan_submitit.slurm.submitit.AutoExecutor")
     def test_create_router_configures_auto_executor(
@@ -115,6 +204,45 @@ class TestSlurmRunner:
 
 
 class TestSlurmLifecycleRouter:
+    def test_dispatch_returns_while_scheduler_submission_is_blocked(
+        self, tmp_path
+    ) -> None:
+        entered_batch = threading.Event()
+        release_batch = threading.Event()
+        dispatch_returned = threading.Event()
+        stdout = tmp_path / "stdout"
+        stdout.write_text("completed")
+        job = MagicMock(job_id="99_0")
+        job.result.return_value = [_result(0)]
+        job.paths = SimpleNamespace(stdout=stdout, stderr=tmp_path / "stderr")
+        executor = MagicMock()
+
+        @contextlib.contextmanager
+        def blocking_batch():
+            entered_batch.set()
+            release_batch.wait(timeout=2)
+            yield
+
+        executor.batch.side_effect = blocking_batch
+        executor.submit.return_value = job
+        router = SlurmLifecycleRouter(executor, units_per_worker=1, max_array_size=1)
+
+        def dispatch() -> None:
+            router.dispatch(_units(1), MagicMock())
+            dispatch_returned.set()
+
+        caller = threading.Thread(target=dispatch)
+        caller.start()
+        try:
+            assert entered_batch.wait(timeout=1)
+            assert dispatch_returned.wait(timeout=1)
+        finally:
+            release_batch.set()
+            caller.join(timeout=2)
+        assert router._thread is not None
+        router._thread.join(timeout=2)
+        assert len(router.collect()) == 1
+
     def test_chunks_arrays_and_preserves_unit_order(self, tmp_path) -> None:
         executor = MagicMock()
         jobs = []
@@ -149,6 +277,50 @@ class TestSlurmLifecycleRouter:
         assert executor.batch.call_count == 2
         assert executor.submit.call_count == 3
         assert router.submitted_job_ids == ("99_0", "99_1", "99_2")
+
+    def test_scheduler_arrays_run_as_sequential_global_concurrency_waves(
+        self, tmp_path
+    ) -> None:
+        first_collection_started = threading.Event()
+        release_first = threading.Event()
+        executor = MagicMock()
+        jobs = []
+        for index in range(3):
+            stdout = tmp_path / f"wave_out_{index}"
+            stdout.write_text("completed")
+            job = MagicMock(job_id=f"44_{index}")
+            job.paths = SimpleNamespace(
+                stdout=stdout,
+                stderr=tmp_path / f"wave_err_{index}",
+            )
+            job.result.return_value = [_result(index)]
+            jobs.append(job)
+
+        def first_result():
+            first_collection_started.set()
+            release_first.wait(timeout=2)
+            return [_result(0)]
+
+        jobs[0].result.side_effect = first_result
+        executor.submit.side_effect = jobs
+        router = SlurmLifecycleRouter(executor, units_per_worker=1, max_array_size=1)
+
+        router.dispatch(_units(3), MagicMock())
+        try:
+            assert first_collection_started.wait(timeout=1)
+            assert executor.submit.call_count == 1
+        finally:
+            release_first.set()
+        assert router._thread is not None
+        router._thread.join(timeout=2)
+
+        results = router.collect()
+        assert [result.execution_run_ids for result in results] == [
+            ["0"],
+            ["1"],
+            ["2"],
+        ]
+        assert executor.batch.call_count == 3
 
     def test_malformed_batch_becomes_one_failure_per_unit(self, tmp_path) -> None:
         job = MagicMock()
@@ -188,18 +360,116 @@ class TestSlurmLifecycleRouter:
         assert all(not result.success for result in results)
         assert all("node failed" in result.error for result in results)
 
-    def test_partial_array_submission_cancels_retained_exact_handle(self) -> None:
+    def test_later_wave_submission_failure_preserves_ordered_cardinality(
+        self, tmp_path
+    ) -> None:
         first_job = MagicMock(job_id="21_0")
+        first_job.result.return_value = [_result(0)]
+        first_job.paths = SimpleNamespace(
+            stdout=tmp_path / "first_stdout",
+            stderr=tmp_path / "first_stderr",
+        )
+        first_job.paths.stdout.write_text("completed")
         executor = MagicMock()
         executor.submit.side_effect = [first_job, RuntimeError("submit failed")]
-        router = SlurmLifecycleRouter(executor, units_per_worker=1, max_array_size=10)
+        router = SlurmLifecycleRouter(executor, units_per_worker=1, max_array_size=1)
 
         results = router.run(_units(3), MagicMock())
 
         assert len(results) == 3
+        assert results[0].success is True
+        assert all(not result.success for result in results[1:])
+        assert all("submit failed" in result.error for result in results[1:])
+        first_job.cancel.assert_not_called()
+
+    def test_batch_context_failure_never_publishes_delayed_jobs(self, tmp_path) -> None:
+        executor = submitit.LocalExecutor(folder=tmp_path / "submitit")
+        router = SlurmLifecycleRouter(executor, units_per_worker=1, max_array_size=2)
+
+        with patch.object(
+            executor,
+            "_internal_process_submissions",
+            side_effect=RuntimeError("scheduler submit failed"),
+        ):
+            results = router.run(_units(3), MagicMock())
+
+        assert router.submitted_job_ids == ()
+        assert len(results) == 3
         assert all(not result.success for result in results)
-        assert all("submit failed" in result.error for result in results)
-        first_job.cancel.assert_called_once_with(check=False)
+        assert all("scheduler submit failed" in result.error for result in results)
+
+    def test_cancel_does_not_touch_job_until_batch_promotion_finishes(
+        self, tmp_path
+    ) -> None:
+        promotion_started = threading.Event()
+        finish_promotion = threading.Event()
+        stdout = tmp_path / "promotion_stdout"
+        stdout.write_text("completed")
+        job = MagicMock(job_id="54_0")
+        job.result.return_value = [_result(0)]
+        job.paths = SimpleNamespace(
+            stdout=stdout,
+            stderr=tmp_path / "promotion_stderr",
+        )
+        executor = MagicMock()
+
+        @contextlib.contextmanager
+        def delayed_promotion():
+            yield
+            promotion_started.set()
+            finish_promotion.wait(timeout=2)
+
+        executor.batch.side_effect = delayed_promotion
+        executor.submit.return_value = job
+        router = SlurmLifecycleRouter(executor, units_per_worker=1, max_array_size=1)
+
+        router.dispatch(_units(1), MagicMock())
+        try:
+            assert promotion_started.wait(timeout=1)
+            router.cancel()
+            job.cancel.assert_not_called()
+        finally:
+            finish_promotion.set()
+        assert router._thread is not None
+        router._thread.join(timeout=2)
+
+        router.collect()
+        job.cancel.assert_called_once_with(check=False)
+
+    def test_cancellation_synthesizes_failures_for_unsubmitted_waves(
+        self, tmp_path
+    ) -> None:
+        collection_started = threading.Event()
+        release_collection = threading.Event()
+        stdout = tmp_path / "cancel_stdout"
+        stdout.write_text("cancelled")
+        job = MagicMock(job_id="55_0")
+        job.paths = SimpleNamespace(stdout=stdout, stderr=tmp_path / "cancel_stderr")
+
+        def cancelled_result():
+            collection_started.set()
+            release_collection.wait(timeout=2)
+            raise RuntimeError("scheduler job cancelled")
+
+        job.result.side_effect = cancelled_result
+        executor = MagicMock()
+        executor.submit.return_value = job
+        router = SlurmLifecycleRouter(executor, units_per_worker=1, max_array_size=1)
+
+        router.dispatch(_units(3), MagicMock())
+        assert collection_started.wait(timeout=1)
+        router.cancel()
+        release_collection.set()
+        assert router._thread is not None
+        router._thread.join(timeout=2)
+
+        results = router.collect()
+        assert executor.submit.call_count == 1
+        assert len(results) == 3
+        assert all(not result.success for result in results)
+        assert "scheduler job cancelled" in results[0].error
+        assert all("before submission" in result.error for result in results[1:])
+        job.cancel.assert_called_once_with(check=False)
 
     def test_dispatch_precondition_failure_completes_with_failures(self) -> None:
         router = SlurmLifecycleRouter(

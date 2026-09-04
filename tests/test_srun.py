@@ -99,6 +99,33 @@ class TestSlurmIntraRunner:
                 "op",
             )
 
+    @pytest.mark.parametrize(
+        "arguments",
+        [
+            ["--ntasks=2"],
+            ["--nodes", "2"],
+            ["-n2"],
+            ["-N2"],
+            ["--cpus-per-task", "8"],
+            ["-c8"],
+            ["--mem=8G"],
+            ["--gres", "gpu:2"],
+            ["-G2"],
+            ["--time=01:00:00"],
+            ["-t60"],
+        ],
+    )
+    def test_managed_srun_argument_fails_fast(self, arguments: list[str]) -> None:
+        runner = SlurmIntraRunner()
+
+        with pytest.raises(ValueError, match="Artisan-managed"):
+            runner.create_lifecycle_router(
+                RunnerResources(extra={"srun_args": arguments}),
+                BatchStrategy(),
+                0,
+                "op",
+            )
+
     @patch.dict("os.environ", {}, clear=True)
     def test_validate_operation_warns_outside_allocation(self) -> None:
         operation = MagicMock(name="operation")

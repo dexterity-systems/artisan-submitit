@@ -36,7 +36,11 @@ from artisan.orchestration.runner_api import (
 )
 
 from artisan_submitit.slurm import _attach_worker_log
-from artisan_submitit.utils import parse_time_to_minutes, read_job_logs
+from artisan_submitit.utils import (
+    parse_time_to_minutes,
+    read_job_logs,
+    reject_managed_scheduler_arguments,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -348,6 +352,9 @@ class SlurmIntraRunner(RunnerBase):
         ):
             msg = "RunnerResources.extra['srun_args'] must be a list of strings"
             raise TypeError(msg)
+        reject_managed_scheduler_arguments(
+            srun_args, "RunnerResources.extra['srun_args']"
+        )
         slurm_gres = extras.get("slurm_gres")
         if slurm_gres is not None and not isinstance(slurm_gres, str):
             msg = "RunnerResources.extra['slurm_gres'] must be a string"
