@@ -28,9 +28,35 @@ step = pipeline.run(
 )
 ```
 
-The router packs units using Artisan's shared helper, submits each
-scheduler-sized chunk within a Submitit `batch()` context, and retains the
-returned job objects. It never reconstructs handles from job names.
+## Resource ownership
+
+Each array entry launches one Artisan worker as a single scheduler task and
+rank. Use `BatchStrategy` to control how execution units are packed and how
+many workers run at once. Multi-node and multi-rank worker topologies are not
+supported.
+
+Set portable CPU, memory, GPU, and time requirements through
+`RunnerResources`. The runner rejects equivalent low-level Submitit parameters
+and managed flags hidden in `slurm_srun_args` or
+`slurm_additional_parameters`, including node and task counts. Genuine
+scheduler policy such as partition, account, constraint, and QoS remains
+provider configuration.
+
+`slurm_gres` is the supported exception for clusters that need a custom GPU
+resource string. When set on the runner or in `RunnerResources.extra`, it
+overrides `RunnerResources.gpus`.
+
+## Array waves
+
+The router packs units using Artisan's shared helper. It detects the cluster's
+`MaxArraySize` and submits at most that many packed batches in one Submitit
+array. If more batches remain, it collects the current array before submitting
+the next scheduler-sized wave. Because waves do not overlap,
+`BatchStrategy.max_workers` caps the whole step rather than each array
+independently.
+
+The router retains every returned job object and never reconstructs handles
+from job names.
 
 Use `squeue` for live status and `sacct -j <job-id>` for terminal state. Logs
 live beneath the pipeline-provided log directory when one is configured, or

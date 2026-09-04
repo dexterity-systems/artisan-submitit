@@ -60,6 +60,10 @@ Portable operation resources stay in Artisan:
 | `gpus` | `gpus_per_node` | `--gres=gpu:N` |
 | `time_limit` | converted to `timeout_min` | `--time` |
 
+Both runners use a single-rank topology: one scheduler task launches one
+Artisan worker process. Scale out with execution units, `units_per_worker`, and
+`max_workers`, not with scheduler node or task-count options.
+
 Provider-specific configuration uses Submitit's native names:
 
 ```python
@@ -73,9 +77,13 @@ runner = SlurmRunner(
 
 Operation-specific values can go in `RunnerResources.extra`, for example
 `{"slurm_partition": "gpu", "slurm_constraint": "a100"}`. Portable values
-such as memory and CPU count must use their typed `RunnerResources` fields.
-The old aliases `partition` and `time_limit` are rejected instead of silently
-translated.
+must use their typed `RunnerResources` fields. Low-level Submitit parameters,
+`slurm_srun_args`, `slurm_additional_parameters`, and `srun_args` cannot
+override task topology or Artisan's CPU, memory, GPU, and time settings; the
+runners reject those conflicts. The supported exception is `slurm_gres`, which
+overrides `RunnerResources.gpus` when you need a cluster-specific GPU request.
+The old aliases `partition` and `time_limit` are also rejected instead of
+silently translated.
 
 `BatchStrategy.max_workers` controls array parallelism for `SlurmRunner` and
 simultaneous processes for `SlurmIntraRunner`. A conflicting low-level
@@ -91,10 +99,13 @@ input artifacts
   / units_per_worker    -> scheduler jobs or srun processes
 ```
 
-`SlurmRunner` detects the cluster's `MaxArraySize` with `scontrol` and splits
-larger submissions into ordered arrays. Set `max_array_size` only when cluster
-configuration cannot be queried. Results are validated against their submitted
-batch and returned in original unit order.
+`SlurmRunner` detects the cluster's `MaxArraySize` with `scontrol`. When a step
+exceeds that limit, the runner submits scheduler-sized waves sequentially and
+collects each wave before submitting the next. Waves never overlap, so
+`BatchStrategy.max_workers` remains a global cap for the step rather than a
+per-array cap. Set `max_array_size` only when cluster configuration cannot be
+queried. Results are validated against their submitted batch and returned in
+original unit order.
 
 ## Failure, logs, and cancellation
 
@@ -124,9 +135,11 @@ python examples/srun_pipeline.py
 ```
 
 `RunnerResources.extra` supports `slurm_gres` and an explicit `srun_args` list
-for this runner. Scheduler placement such as partition and account belongs to
-the command that created the allocation. Every router uses a unique work
-directory so concurrent pipelines cannot collide on step indexes.
+for this runner. Use `srun_args` only for flags that do not replace the
+single-rank topology or portable resources. Scheduler placement such as
+partition and account belongs to the command that created the allocation.
+Every router uses a unique work directory so concurrent pipelines cannot
+collide on step indexes.
 
 ## Development and Docker
 
