@@ -23,7 +23,7 @@ classifiers = [
 ]
 dependencies = [
     "cloudpickle>=3,<4",
-    "dexterity-artisan>=0.1.2a6",
+    "dexterity-artisan>=0.2.0",
     "submitit>=1.5,<2",
 ]
 
@@ -60,7 +60,7 @@ python = "3.12.*"
 artisan-submitit = { path = ".", editable = true }
 dexterity-artisan = { path = "../artisan", editable = true }
 
-# Remove after dexterity-artisan 0.1.2a6 is published. The provider requires
+# Remove after dexterity-artisan 0.2.0 is published. The provider requires
 # that release, while development temporarily bootstraps from the sibling tree.
 [tool.pixi.pypi-options.dependency-overrides]
 dexterity-artisan = { path = "../artisan", editable = true }

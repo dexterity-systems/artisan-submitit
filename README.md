@@ -41,7 +41,7 @@ its built-in local runner.
 ## Requirements
 
 - Python 3.12 or newer;
-- `dexterity-artisan` 0.1.2a6 or newer, which provides
+- `dexterity-artisan` 0.2.0 or newer, which provides
   `artisan.orchestration.runner_api`;
 - Submitit 1.5 or newer;
 - a shared filesystem visible at the same paths from the pipeline manager and
@@ -172,7 +172,7 @@ symlink to a differently named worktree makes the otherwise portable lock look
 stale. `ARTISAN_WORKTREE` has no such restriction because Compose always mounts
 the selected source at `/workspace/artisan`.
 
-Until `dexterity-artisan` 0.1.2a6 is published, Pixi explicitly overrides the
+Until `dexterity-artisan` 0.2.0 is published, Pixi explicitly overrides the
 provider's release dependency with the sibling checkout. CI creates the same
 sibling layout by checking out Artisan beside this repository. Merge and
 publish the compatible Artisan release before publishing `artisan-submitit`,

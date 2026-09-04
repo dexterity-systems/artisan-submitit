@@ -17,7 +17,7 @@ def test_artisan_dependency_requires_runner_api_release() -> None:
         if requirement.startswith("dexterity-artisan")
     ]
 
-    assert artisan_requirements == ["dexterity-artisan>=0.1.2a6"]
+    assert artisan_requirements == ["dexterity-artisan>=0.2.0"]
 
 
 def test_version_is_generated_from_vcs() -> None:

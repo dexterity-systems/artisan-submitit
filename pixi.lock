@@ -1128,7 +1128,7 @@ packages:
   sha256: aea8691f0bbe8acdb74413c7c224e70fa4d78f930baf6c7bf7f80e596d33202b
   requires_dist:
   - cloudpickle>=3,<4
-  - dexterity-artisan>=0.1.2a6
+  - dexterity-artisan>=0.2.0
   - submitit>=1.5,<2
   requires_python: '>=3.12'
 - pypi: https://files.pythonhosted.org/packages/d4/2b/04b8a15f3a1c77bc79ddf5c73875327f34b4fa75982df2b76e45e402d364/asttokens-3.0.2-py3-none-any.whl
