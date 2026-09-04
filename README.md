@@ -152,9 +152,13 @@ The Pixi environment expects Artisan in a real sibling `../artisan` checkout:
 
 ```bash
 pixi install --locked -e dev
+pixi run --locked -e dev setup
 pixi run --locked -e dev fmt
 pixi run --locked -e dev typecheck
 pixi run --locked -e dev test
+pixi run --locked -e dev pre-commit run --all-files
+pixi run --locked -e dev build-dist
+pixi run --locked -e dev check-dist
 ```
 
 That sibling is the conventional standalone development layout. Docker does
@@ -166,6 +170,16 @@ Pixi records the canonical path of editable dependencies in `pixi.lock`, so a
 symlink to a differently named worktree makes the otherwise portable lock look
 stale. `ARTISAN_WORKTREE` has no such restriction because Compose always mounts
 the selected source at `/workspace/artisan`.
+
+Until `dexterity-artisan` 0.1.2a6 is published, Pixi explicitly overrides the
+provider's release dependency with the sibling checkout. CI creates the same
+sibling layout by checking out Artisan beside this repository. Merge and
+publish the compatible Artisan release before publishing `artisan-submitit`,
+then remove the temporary dependency override and regenerate `pixi.lock`.
+
+The focused guides in `docs/` are plain Markdown rather than a Jupyter Book;
+the repository does not carry a documentation build task or publish a separate
+documentation site.
 
 The Docker cluster is adapted from the `prefect-submitit` v0.1.8 development
 image and mounts both editable repositories:

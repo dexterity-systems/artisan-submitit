@@ -1,6 +1,6 @@
 [project]
 name = "artisan-submitit"
-version = "0.1.0"
+dynamic = ["version"]
 description = "SLURM execution providers for Artisan via Submitit"
 readme = "README.md"
 license = "BSD-3-Clause"
@@ -13,6 +13,7 @@ classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
     "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: BSD License",
     "Operating System :: POSIX :: Linux",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.12",
@@ -32,8 +33,17 @@ Repository = "https://github.com/dexterity-systems/artisan-submitit"
 Issues = "https://github.com/dexterity-systems/artisan-submitit/issues"
 
 [build-system]
-requires = ["hatchling>=1.27,<1.32"]
+requires = ["hatchling>=1.27,<1.32", "hatch-vcs>=0.5,<1"]
 build-backend = "hatchling.build"
+
+[tool.hatch.version]
+source = "vcs"
+
+[tool.hatch.version.raw-options]
+fallback_version = "0.0.0"
+
+[tool.hatch.build.hooks.vcs]
+version-file = "src/artisan_submitit/_version.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/artisan_submitit"]
@@ -60,6 +70,7 @@ pytest = "*"
 pytest-timeout = "*"
 ruff = "==0.13.2"
 mypy = "==1.18.2"
+pre-commit = "=4.3.0,<5"
 
 [tool.pixi.feature.dev.pypi-dependencies]
 build = ">=1.4,<2"
@@ -69,14 +80,16 @@ twine = ">=6.2,<7"
 fmt = "ruff format . && ruff check --fix ."
 typecheck = "mypy src"
 test = "pytest tests/ --ignore=tests/integration"
+test-unit = "pytest tests/ --ignore=tests/integration"
 test-sbatch = { cmd = "pytest -p no:cacheprovider --run-slurm tests/integration/test_slurm.py", env = { PYTHONPATH = ".", SLURM_TEST_PARTITION = "cpu" } }
 test-sbatch-docker = { cmd = "pytest -p no:cacheprovider --run-slurm tests/integration/test_slurm.py", env = { PYTHONPATH = ".", SLURM_TEST_PARTITION = "debug" } }
 test-srun = { cmd = "salloc -n4 --mem=4G -- bash -c 'python -m pytest -p no:cacheprovider --run-slurm tests/integration/test_srun.py'", env = { PYTHONPATH = ".", SLURM_TEST_PARTITION = "cpu" } }
 test-srun-docker = { cmd = "salloc -p debug -n4 --mem=4G -- bash -c 'python -m pytest -p no:cacheprovider --run-slurm tests/integration/test_srun.py'", env = { PYTHONPATH = ".", SLURM_TEST_PARTITION = "debug" } }
-build-dist = "python -m build"
+build-dist = "rm -rf dist/ && python -m build"
 check-dist = "python -m twine check dist/*"
 
 [tool.pixi.tasks]
+setup = "bash scripts/setup.sh"
 slurm-build = "docker compose -f docker/docker-compose.yml build"
 slurm-up = "docker compose -f docker/docker-compose.yml up -d"
 slurm-down = "docker compose -f docker/docker-compose.yml down -v"
@@ -92,6 +105,9 @@ dev = { features = ["dev"], solve-group = "default" }
 [tool.pytest.ini_options]
 minversion = "7"
 testpaths = ["tests"]
+pythonpath = ["tests"]
+log_cli_level = "INFO"
+xfail_strict = true
 addopts = ["-ra", "--strict-config", "--strict-markers"]
 filterwarnings = ["error"]
 markers = [
@@ -131,10 +147,19 @@ isort.required-imports = ["from __future__ import annotations"]
 
 [tool.mypy]
 mypy_path = ["src", "../artisan/src"]
-files = ["src"]
+files = ["src", "tests"]
 python_version = "3.12"
 strict = true
+warn_return_any = true
+warn_unused_configs = true
 warn_unreachable = true
+enable_error_code = ["ignore-without-code", "redundant-expr", "truthy-bool"]
+explicit_package_bases = true
+namespace_packages = true
+
+[[tool.mypy.overrides]]
+module = ["tests.*", "conftest"]
+ignore_errors = true
 
 [[tool.mypy.overrides]]
 module = ["cloudpickle", "submitit.*"]
@@ -144,3 +169,6 @@ ignore_missing_imports = true
 module = ["artisan", "artisan.*"]
 follow_imports = "silent"
 ignore_missing_imports = true
+
+[tool.codespell]
+skip = "pixi.lock,_dev/**"

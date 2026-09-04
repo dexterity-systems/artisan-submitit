@@ -356,9 +356,7 @@ class SlurmIntraRunner(RunnerBase):
             msg = "poll_interval must be positive and cancel_grace_period non-negative"
             raise ValueError(msg)
         if srun_launch_concurrency is not None and (
-            isinstance(srun_launch_concurrency, bool)
-            or not isinstance(srun_launch_concurrency, int)
-            or srun_launch_concurrency < 1
+            isinstance(srun_launch_concurrency, bool) or srun_launch_concurrency < 1
         ):
             msg = "srun_launch_concurrency must be a positive integer"
             raise ValueError(msg)

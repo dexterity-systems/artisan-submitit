@@ -18,9 +18,13 @@ commands so the lock file is not rewritten unexpectedly.
 
 ```bash
 ~/.pixi/bin/pixi install --locked
+~/.pixi/bin/pixi run --locked -e dev setup
 ~/.pixi/bin/pixi run --locked -e dev fmt
 ~/.pixi/bin/pixi run --locked -e dev typecheck
 ~/.pixi/bin/pixi run --locked -e dev test
+~/.pixi/bin/pixi run --locked -e dev pre-commit run --all-files
+~/.pixi/bin/pixi run --locked -e dev build-dist
+~/.pixi/bin/pixi run --locked -e dev check-dist
 ~/.pixi/bin/pixi run --locked -e dev test-sbatch
 ~/.pixi/bin/pixi run --locked -e dev test-srun
 ~/.pixi/bin/pixi run --locked slurm-build
@@ -31,6 +35,9 @@ commands so the lock file is not rewritten unexpectedly.
 The development environment expects a real sibling Artisan checkout at
 `../artisan`; a symlink is not Pixi-lock portable. Set `ARTISAN_WORKTREE` to any
 Artisan checkout or nested worktree for Docker commands.
+
+Versions come from Git tags through hatch-vcs. Do not edit the generated,
+gitignored `src/artisan_submitit/_version.py`.
 
 ## Code Style
 
@@ -49,6 +56,10 @@ Artisan checkout or nested worktree for Docker commands.
   `@pytest.mark.slurm`.
 - Cover happy paths, ordering, failures, cancellation isolation, and invalid
   configuration.
+
+The focused guides remain plain Markdown because this small provider has no
+Jupyter Book navigation or executable documentation surface. Review their
+links and examples directly when behavior changes.
 
 ## Git
 

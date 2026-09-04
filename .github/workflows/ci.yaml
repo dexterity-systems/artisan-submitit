@@ -1,0 +1,111 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PIXI_LOCKED: "1"
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: artisan-submitit
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          path: artisan-submitit
+      - uses: actions/checkout@v6
+        with:
+          repository: dexterity-systems/artisan
+          path: artisan
+      - uses: prefix-dev/setup-pixi@v0.10.0
+        with:
+          manifest-path: artisan-submitit/pyproject.toml
+          pixi-version: v0.66.0
+          environments: dev
+          locked: true
+      - name: Lint
+        run: pixi run --locked -e dev fmt
+      - name: Check for lint changes
+        run: git diff --exit-code
+
+  pre-commit:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: artisan-submitit
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          path: artisan-submitit
+      - uses: actions/checkout@v6
+        with:
+          repository: dexterity-systems/artisan
+          path: artisan
+      - uses: prefix-dev/setup-pixi@v0.10.0
+        with:
+          manifest-path: artisan-submitit/pyproject.toml
+          pixi-version: v0.66.0
+          environments: dev
+          locked: true
+      - name: Run pre-commit
+        run: pixi run --locked -e dev pre-commit run --all-files --show-diff-on-failure
+
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: artisan-submitit
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          path: artisan-submitit
+      - uses: actions/checkout@v6
+        with:
+          repository: dexterity-systems/artisan
+          path: artisan
+      - uses: prefix-dev/setup-pixi@v0.10.0
+        with:
+          manifest-path: artisan-submitit/pyproject.toml
+          pixi-version: v0.66.0
+          environments: dev
+          locked: true
+      - name: Type check
+        run: pixi run --locked -e dev typecheck
+      - name: Run unit tests
+        run: pixi run --locked -e dev test
+
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: artisan-submitit
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          path: artisan-submitit
+          fetch-depth: 0
+      - uses: actions/checkout@v6
+        with:
+          repository: dexterity-systems/artisan
+          path: artisan
+      - uses: prefix-dev/setup-pixi@v0.10.0
+        with:
+          manifest-path: artisan-submitit/pyproject.toml
+          pixi-version: v0.66.0
+          environments: dev
+          locked: true
+      - name: Build distribution
+        run: pixi run --locked -e dev build-dist
+      - name: Check distribution
+        run: pixi run --locked -e dev check-dist
