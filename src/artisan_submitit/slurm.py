@@ -26,9 +26,9 @@ from artisan.orchestration.runner_api import (
 )
 
 from artisan_submitit.utils import (
-    MANAGED_SCHEDULER_OPTION_NAMES,
     chunked,
     get_cluster_max_array_size,
+    is_managed_scheduler_option,
     parse_time_to_minutes,
     read_job_logs,
     reject_managed_scheduler_arguments,
@@ -64,7 +64,6 @@ _TOPOLOGY_PARAMETER_NAMES = frozenset(
         "tasks_per_node",
     }
 )
-_MANAGED_ADDITIONAL_PARAMETER_NAMES = MANAGED_SCHEDULER_OPTION_NAMES | {"array"}
 _REMOVED_PARAMETER_NAMES = {
     "partition": "slurm_partition",
     "time_limit": "RunnerResources.time_limit",
@@ -363,8 +362,7 @@ def _validate_additional_parameters(value: object) -> None:
     if not isinstance(value, dict) or not all(isinstance(key, str) for key in value):
         msg = "slurm_additional_parameters must be a dict with string keys"
         raise TypeError(msg)
-    normalized = {key.lstrip("-").replace("_", "-").lower() for key in value}
-    managed = normalized & _MANAGED_ADDITIONAL_PARAMETER_NAMES
+    managed = {key for key in value if is_managed_scheduler_option(key)}
     if managed:
         names = ", ".join(sorted(managed))
         msg = (

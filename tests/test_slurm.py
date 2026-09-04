@@ -141,6 +141,14 @@ class TestSlurmRunner:
             ["--mem=8G"],
             ["--gres", "gpu:2"],
             ["-G2"],
+            ["--gpus-per-socket=2"],
+            ["--tres-per-task=gres/gpu:2"],
+            ["--sockets-per-node=2"],
+            ["--cores-per-socket=4"],
+            ["--threads-per-core=2"],
+            ["--core-spec=1"],
+            ["-B2:4:1"],
+            ["-S1"],
             ["--time=01:00:00"],
             ["-t60"],
         ],
@@ -158,6 +166,12 @@ class TestSlurmRunner:
             {"cpus-per-task": 8},
             {"mem": "8G"},
             {"gres": "gpu:2"},
+            {"gpus-per-socket": 2},
+            {"tres-per-task": "gres/gpu:2"},
+            {"sockets-per-node": 2},
+            {"cores-per-socket": 4},
+            {"threads-per-core": 2},
+            {"core-spec": 1},
             {"time": 60},
         ],
     )
@@ -169,16 +183,36 @@ class TestSlurmRunner:
 
     def test_unmanaged_native_parameters_remain_available(self) -> None:
         runner = SlurmRunner(
-            slurm_srun_args=["--export=ALL", "--exclusive"],
-            slurm_additional_parameters={"mail-type": "FAIL"},
+            slurm_srun_args=[
+                "--export=ALL",
+                "--exclusive",
+                "--cpu-bind=cores",
+                "--constraint",
+                "gpus-per-socket",
+                "--tres-bind=gres/gpu:closest",
+            ],
+            slurm_additional_parameters={
+                "constraint": "a100",
+                "mail-type": "FAIL",
+            },
         )
 
         parameters = runner._executor_parameters(
             RunnerResources(), BatchStrategy(), 0, "op"
         )
 
-        assert parameters["slurm_srun_args"] == ["--export=ALL", "--exclusive"]
-        assert parameters["slurm_additional_parameters"] == {"mail-type": "FAIL"}
+        assert parameters["slurm_srun_args"] == [
+            "--export=ALL",
+            "--exclusive",
+            "--cpu-bind=cores",
+            "--constraint",
+            "gpus-per-socket",
+            "--tres-bind=gres/gpu:closest",
+        ]
+        assert parameters["slurm_additional_parameters"] == {
+            "constraint": "a100",
+            "mail-type": "FAIL",
+        }
 
     @patch("artisan_submitit.slurm.get_cluster_max_array_size", return_value=100)
     @patch("artisan_submitit.slurm.submitit.AutoExecutor")

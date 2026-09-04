@@ -14,26 +14,32 @@ from pathlib import Path
 
 DEFAULT_MAX_ARRAY_SIZE = 1000
 MAX_LOG_BYTES = 100_000
-MANAGED_SCHEDULER_OPTION_NAMES = frozenset(
+_MANAGED_SCHEDULER_OPTION_NAMES = frozenset(
     {
-        "cpus-per-gpu",
-        "cpus-per-task",
+        "array",
+        "core-spec",
+        "cores-per-socket",
+        "extra-node-info",
         "gpus",
-        "gpus-per-node",
-        "gpus-per-task",
         "gres",
         "mem",
-        "mem-per-cpu",
-        "mem-per-gpu",
+        "mincpus",
         "nodes",
         "ntasks",
-        "ntasks-per-core",
-        "ntasks-per-gpu",
-        "ntasks-per-node",
+        "sockets-per-node",
+        "thread-spec",
+        "threads-per-core",
         "time",
     }
 )
-_MANAGED_SCHEDULER_SHORT_OPTIONS = frozenset({"-G", "-N", "-c", "-n", "-t"})
+_MANAGED_SCHEDULER_OPTION_PREFIXES = (
+    "cpus-per-",
+    "gpus-per-",
+    "mem-per-",
+    "ntasks-per-",
+    "tres-per-",
+)
+_MANAGED_SCHEDULER_SHORT_OPTIONS = frozenset({"-B", "-G", "-N", "-S", "-c", "-n", "-t"})
 
 logger = logging.getLogger(__name__)
 
@@ -60,20 +66,30 @@ def reject_managed_scheduler_arguments(
             msg = f"{parameter_name} must be a sequence of strings"
             raise TypeError(msg)
         option = _scheduler_option_name(argument)
-        if option in MANAGED_SCHEDULER_OPTION_NAMES or (
-            len(argument) >= 2 and argument[:2] in _MANAGED_SCHEDULER_SHORT_OPTIONS
-        ):
+        if option is not None and is_managed_scheduler_option(option):
             msg = (
                 f"{parameter_name} cannot override Artisan-managed option {argument!r}"
             )
             raise ValueError(msg)
 
 
+def is_managed_scheduler_option(option: str) -> bool:
+    """Return whether a scheduler option overrides Artisan-owned policy."""
+    if option in _MANAGED_SCHEDULER_SHORT_OPTIONS:
+        return True
+    name = option.lstrip("-").split("=", maxsplit=1)[0].replace("_", "-").lower()
+    return name in _MANAGED_SCHEDULER_OPTION_NAMES or name.startswith(
+        _MANAGED_SCHEDULER_OPTION_PREFIXES
+    )
+
+
 def _scheduler_option_name(argument: str) -> str | None:
-    """Return a normalized long scheduler option name, when present."""
-    if not argument.startswith("--"):
-        return None
-    return argument[2:].split("=", maxsplit=1)[0].replace("_", "-").lower()
+    """Extract an option name without treating separate values as options."""
+    if argument.startswith("--"):
+        return argument[2:].split("=", maxsplit=1)[0]
+    if argument.startswith("-") and len(argument) >= 2:
+        return argument[:2]
+    return None
 
 
 def parse_time_to_minutes(value: str) -> int:
