@@ -1,0 +1,26 @@
+version: 1
+
+project:
+  title: artisan-submitit
+  copyright: "2026"
+  github: https://github.com/dexterity-systems/artisan-submitit
+  toc:
+    - file: index.md
+    - file: slurm.md
+    - file: srun.md
+    - file: migration.md
+
+site:
+  title: artisan-submitit
+  nav:
+    - title: Queue execution
+      url: /slurm
+    - title: Intra-allocation execution
+      url: /srun
+    - title: Migration
+      url: /migration
+  actions:
+    - title: GitHub
+      url: https://github.com/dexterity-systems/artisan-submitit
+  options:
+    logo_text: artisan-submitit

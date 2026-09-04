@@ -25,6 +25,7 @@ commands so the lock file is not rewritten unexpectedly.
 ~/.pixi/bin/pixi run --locked -e dev pre-commit run --all-files
 ~/.pixi/bin/pixi run --locked -e dev build-dist
 ~/.pixi/bin/pixi run --locked -e dev check-dist
+~/.pixi/bin/pixi run --locked -e docs docs-build
 ~/.pixi/bin/pixi run --locked -e dev test-sbatch
 ~/.pixi/bin/pixi run --locked -e dev test-srun
 ~/.pixi/bin/pixi run --locked slurm-build
@@ -57,9 +58,8 @@ gitignored `src/artisan_submitit/_version.py`.
 - Cover happy paths, ordering, failures, cancellation isolation, and invalid
   configuration.
 
-The focused guides remain plain Markdown because this small provider has no
-Jupyter Book navigation or executable documentation surface. Review their
-links and examples directly when behavior changes.
+The focused guides form a small Jupyter Book 2 site. Keep `docs/myst.yml`
+navigation and examples synchronized when behavior changes.
 
 ## Git
 

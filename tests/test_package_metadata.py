@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import tomllib
+from importlib.metadata import version
 from pathlib import Path
 
 import artisan_submitit
@@ -20,5 +21,5 @@ def test_artisan_dependency_requires_runner_api_release() -> None:
 
 
 def test_version_is_generated_from_vcs() -> None:
-    assert artisan_submitit.__version__
+    assert artisan_submitit.__version__ == version("artisan-submitit")
     assert artisan_submitit.__version_tuple__

@@ -159,6 +159,7 @@ pixi run --locked -e dev test
 pixi run --locked -e dev pre-commit run --all-files
 pixi run --locked -e dev build-dist
 pixi run --locked -e dev check-dist
+pixi run --locked -e docs docs-build
 ```
 
 That sibling is the conventional standalone development layout. Docker does
@@ -177,9 +178,8 @@ sibling layout by checking out Artisan beside this repository. Merge and
 publish the compatible Artisan release before publishing `artisan-submitit`,
 then remove the temporary dependency override and regenerate `pixi.lock`.
 
-The focused guides in `docs/` are plain Markdown rather than a Jupyter Book;
-the repository does not carry a documentation build task or publish a separate
-documentation site.
+The focused guides in `docs/` build as a small Jupyter Book 2 site and are
+validated in CI.
 
 The Docker cluster is adapted from the `prefect-submitit` v0.1.8 development
 image and mounts both editable repositories:

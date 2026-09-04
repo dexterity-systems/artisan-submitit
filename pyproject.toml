@@ -76,6 +76,14 @@ pre-commit = "=4.3.0,<5"
 build = ">=1.4,<2"
 twine = ">=6.2,<7"
 
+[tool.pixi.feature.docs.dependencies]
+python = "3.12.*"
+nodejs = ">=20,<25"
+
+[tool.pixi.feature.docs.pypi-dependencies]
+jupyter-book = ">=2.0.0"
+mystmd = ">=1.3.0"
+
 [tool.pixi.feature.dev.tasks]
 fmt = "ruff format . && ruff check --fix ."
 typecheck = "mypy src"
@@ -87,6 +95,11 @@ test-srun = { cmd = "salloc -n4 --mem=4G -- bash -c 'python -m pytest -p no:cach
 test-srun-docker = { cmd = "salloc -p debug -n4 --mem=4G -- bash -c 'python -m pytest -p no:cacheprovider --run-slurm tests/integration/test_srun.py'", env = { PYTHONPATH = ".", SLURM_TEST_PARTITION = "debug" } }
 build-dist = "rm -rf dist/ && python -m build"
 check-dist = "python -m twine check dist/*"
+
+[tool.pixi.feature.docs.tasks]
+docs-build = { cmd = "jupyter-book build --html", cwd = "docs" }
+docs-clean = { cmd = "jupyter-book clean", cwd = "docs" }
+docs-serve = { cmd = "python -m http.server -d _build/html 8000", cwd = "docs" }
 
 [tool.pixi.tasks]
 setup = "bash scripts/setup.sh"
@@ -101,6 +114,7 @@ slurm-test-srun = "docker compose -f docker/docker-compose.yml exec -T -u docker
 [tool.pixi.environments]
 default = { solve-group = "default" }
 dev = { features = ["dev"], solve-group = "default" }
+docs = { features = ["docs"], no-default-feature = true }
 
 [tool.pytest.ini_options]
 minversion = "7"
@@ -111,6 +125,7 @@ xfail_strict = true
 addopts = ["-ra", "--strict-config", "--strict-markers"]
 filterwarnings = ["error"]
 markers = [
+    "integration: end-to-end tests requiring real infrastructure",
     "slurm: tests that submit real SLURM jobs (deselected unless --run-slurm)",
 ]
 

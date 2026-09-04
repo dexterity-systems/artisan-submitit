@@ -18,7 +18,7 @@ from artisan_submitit import SlurmRunner
 
 from .operations import FailingWait
 
-pytestmark = pytest.mark.slurm
+pytestmark = (pytest.mark.integration, pytest.mark.slurm)
 
 PARTITION = os.environ.get("SLURM_TEST_PARTITION", "cpu")
 
