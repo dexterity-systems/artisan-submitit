@@ -1,0 +1,141 @@
+[project]
+name = "artisan-submitit"
+version = "0.1.0"
+description = "SLURM execution providers for Artisan via Submitit"
+readme = "README.md"
+license = "BSD-3-Clause"
+requires-python = ">=3.12"
+maintainers = [
+    { name = "Dexterity Systems" },
+]
+keywords = ["artisan", "slurm", "submitit", "hpc", "pipeline"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: System :: Distributed Computing",
+    "Topic :: Scientific/Engineering",
+]
+dependencies = [
+    "cloudpickle>=3,<4",
+    "dexterity-artisan",
+    "submitit>=1.5,<2",
+]
+
+[project.urls]
+Homepage = "https://github.com/dexterity-systems/artisan-submitit"
+Repository = "https://github.com/dexterity-systems/artisan-submitit"
+Issues = "https://github.com/dexterity-systems/artisan-submitit/issues"
+
+[build-system]
+requires = ["hatchling>=1.27,<1.32"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/artisan_submitit"]
+
+[tool.pixi.workspace]
+channels = ["conda-forge"]
+platforms = ["linux-64", "linux-aarch64", "osx-arm64"]
+requires-pixi = "==0.66.0"
+
+[tool.pixi.dependencies]
+python = "3.12.*"
+
+[tool.pixi.pypi-dependencies]
+artisan-submitit = { path = ".", editable = true }
+dexterity-artisan = { path = "../artisan", editable = true }
+
+[tool.pixi.feature.dev.dependencies]
+pytest = "*"
+pytest-timeout = "*"
+ruff = "==0.13.2"
+mypy = "==1.18.2"
+
+[tool.pixi.feature.dev.pypi-dependencies]
+build = ">=1.4,<2"
+twine = ">=6.2,<7"
+
+[tool.pixi.feature.dev.tasks]
+fmt = "ruff format . && ruff check --fix ."
+typecheck = "mypy src"
+test = "pytest tests/ --ignore=tests/integration"
+test-sbatch = { cmd = "pytest -p no:cacheprovider --run-slurm tests/integration/test_slurm.py", env = { PYTHONPATH = ".", SLURM_TEST_PARTITION = "cpu" } }
+test-sbatch-docker = { cmd = "pytest -p no:cacheprovider --run-slurm tests/integration/test_slurm.py", env = { PYTHONPATH = ".", SLURM_TEST_PARTITION = "debug" } }
+test-srun = { cmd = "salloc -n4 --mem=4G -- bash -c 'python -m pytest -p no:cacheprovider --run-slurm tests/integration/test_srun.py'", env = { PYTHONPATH = ".", SLURM_TEST_PARTITION = "cpu" } }
+test-srun-docker = { cmd = "salloc -p debug -n4 --mem=4G -- bash -c 'python -m pytest -p no:cacheprovider --run-slurm tests/integration/test_srun.py'", env = { PYTHONPATH = ".", SLURM_TEST_PARTITION = "debug" } }
+build-dist = "python -m build"
+check-dist = "python -m twine check dist/*"
+
+[tool.pixi.tasks]
+slurm-build = "docker compose -f docker/docker-compose.yml build"
+slurm-up = "docker compose -f docker/docker-compose.yml up -d"
+slurm-down = "docker compose -f docker/docker-compose.yml down -v"
+slurm-shell = "docker compose -f docker/docker-compose.yml exec -u docker slurm bash"
+slurm-install = "docker compose -f docker/docker-compose.yml exec -T -u docker slurm pixi install --locked -e dev"
+slurm-test-sbatch = "docker compose -f docker/docker-compose.yml exec -T -u docker slurm pixi run --locked -e dev test-sbatch-docker"
+slurm-test-srun = "docker compose -f docker/docker-compose.yml exec -T -u docker slurm pixi run --locked -e dev test-srun-docker"
+
+[tool.pixi.environments]
+default = { solve-group = "default" }
+dev = { features = ["dev"], solve-group = "default" }
+
+[tool.pytest.ini_options]
+minversion = "7"
+testpaths = ["tests"]
+addopts = ["-ra", "--strict-config", "--strict-markers"]
+filterwarnings = ["error"]
+markers = [
+    "slurm: tests that submit real SLURM jobs (deselected unless --run-slurm)",
+]
+
+[tool.ruff]
+extend-exclude = [".pixi"]
+
+[tool.ruff.lint]
+extend-select = [
+    "ARG",
+    "B",
+    "C4",
+    "EM",
+    "G",
+    "I",
+    "ICN",
+    "PGH",
+    "PIE",
+    "PL",
+    "PT",
+    "PTH",
+    "RET",
+    "RUF",
+    "SIM",
+    "T20",
+    "UP",
+]
+ignore = ["PLR09", "PLR2004"]
+isort.required-imports = ["from __future__ import annotations"]
+
+[tool.ruff.lint.per-file-ignores]
+"src/artisan_submitit/srun_worker.py" = ["T20"]
+"examples/**" = ["T201"]
+"tests/**" = ["ARG001", "ARG002", "ARG005", "EM101", "PLC0415", "PLW1510", "PTH", "RUF059", "SIM117"]
+
+[tool.mypy]
+mypy_path = ["src", "../artisan/src"]
+files = ["src"]
+python_version = "3.12"
+strict = true
+warn_unreachable = true
+
+[[tool.mypy.overrides]]
+module = ["cloudpickle", "submitit.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["artisan", "artisan.*"]
+follow_imports = "silent"
+ignore_missing_imports = true
