@@ -19,14 +19,6 @@ pixi run slurm-up
 pixi run slurm-shell
 ```
 
-For the Artisan development layout used by the maintainers, the variable is
-required because worktrees live below the main checkout rather than beside this
-repository, for example:
-
-```bash
-export ARTISAN_WORKTREE=/path/to/artisan/worktree
-```
-
 The UID/GID variables let the container's unprivileged `docker` user write
 generated editable-install metadata and pytest state without changing bind-
 mounted repository ownership.

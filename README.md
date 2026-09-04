@@ -139,8 +139,8 @@ pixi run --locked -e dev test
 ```
 
 That sibling is the conventional standalone development layout. Docker does
-not assume it: set `ARTISAN_WORKTREE` explicitly when Artisan uses a nested
-worktree layout such as `/path/to/artisan/<worktree>`.
+not assume it: set `ARTISAN_WORKTREE` explicitly when Artisan uses a nested or
+otherwise non-sibling worktree layout.
 
 Use an actual checkout rather than a symlink for the host Pixi environment.
 Pixi records the canonical path of editable dependencies in `pixi.lock`, so a
