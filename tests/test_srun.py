@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import pickle
 import subprocess
+import time
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -162,7 +164,7 @@ class TestSlurmIntraLifecycleRouter:
     def test_cancel_terminates_only_owned_processes(self, tmp_path) -> None:
         router = _router(tmp_path)
         running = MagicMock(pid=10)
-        running.poll.return_value = None
+        running.poll.side_effect = [None, None, 0, 0]
         running.wait.side_effect = subprocess.TimeoutExpired("srun", 0)
         complete = MagicMock(pid=11)
         complete.poll.return_value = 0
@@ -170,6 +172,7 @@ class TestSlurmIntraLifecycleRouter:
             MagicMock(process=running),
             MagicMock(process=complete),
         ]
+        router._dispatch_started = True
 
         router.cancel()
         router.cancel()
@@ -177,6 +180,33 @@ class TestSlurmIntraLifecycleRouter:
         running.terminate.assert_called_once()
         running.kill.assert_called_once()
         complete.terminate.assert_not_called()
+
+    @patch("artisan_submitit.srun._terminate_processes")
+    def test_failed_process_cancellation_is_retried(
+        self,
+        terminate: MagicMock,
+        tmp_path,
+    ) -> None:
+        router = _router(tmp_path)
+        process = MagicMock(pid=10)
+        process.poll.return_value = None
+        terminate.side_effect = [set(), {id(process)}]
+        router._submitted = [MagicMock(process=process)]
+        router._dispatch_started = True
+
+        router.cancel()
+        router.cancel()
+
+        assert terminate.call_count == 2
+
+    @patch.dict("os.environ", {}, clear=True)
+    def test_idle_cancel_does_not_poison_later_dispatch(self, tmp_path) -> None:
+        router = _router(tmp_path)
+        router.cancel()
+
+        assert not router._cancelled.is_set()
+        with pytest.raises(RuntimeError, match="SLURM_JOB_ID"):
+            router.dispatch([], MagicMock())
 
     @patch("artisan_submitit.srun._terminate_processes")
     @patch("artisan_submitit.srun.subprocess.Popen")
@@ -190,6 +220,7 @@ class TestSlurmIntraLifecycleRouter:
         process = MagicMock(pid=12)
         process.poll.return_value = None
         popen.return_value = process
+        router._dispatch_started = True
         router.cancel()
         terminate.reset_mock()
 
@@ -206,8 +237,59 @@ class TestSlurmIntraLifecycleRouter:
         router = _router(tmp_path, max_workers=1)
         process = MagicMock(pid=10)
         process.poll.side_effect = [None, 0]
-        router._submitted = [MagicMock(process=process)]
+        router._submitted = [
+            MagicMock(process=process, launched_at=time.monotonic() + 60)
+        ]
 
         router._wait_for_slot()
 
         sleep.assert_called_once_with(0.01)
+
+    @patch("artisan_submitit.srun._terminate_processes")
+    @patch("artisan_submitit.srun.time.sleep")
+    def test_wait_for_slot_enforces_process_deadline(
+        self,
+        sleep: MagicMock,
+        terminate: MagicMock,
+        tmp_path,
+    ) -> None:
+        router = _router(tmp_path, max_workers=1, max_poll_time=1)
+        process = MagicMock(pid=10)
+        process.poll.side_effect = [None, 0]
+        router._submitted = [
+            MagicMock(process=process, launched_at=time.monotonic() - 2)
+        ]
+
+        router._wait_for_slot()
+
+        terminate.assert_called_once_with([process], 0.0)
+        sleep.assert_called_once_with(0.01)
+
+    def test_result_read_retries_nfs_visibility(self, tmp_path) -> None:
+        router = _router(tmp_path)
+        folder = tmp_path / "step"
+        folder.mkdir()
+        submitted = MagicMock(folder=folder, units=[MagicMock()])
+        submitted.process.pid = 10
+
+        def publish_result(_: float) -> None:
+            with (folder / "result.pkl").open("wb") as stream:
+                pickle.dump({"status": "ok", "result": ["done"]}, stream)
+
+        with patch("artisan_submitit.srun.time.sleep", side_effect=publish_result):
+            assert router._read_result(submitted) == ["done"]
+
+    def test_result_read_retries_transient_pickle_eof(self, tmp_path) -> None:
+        router = _router(tmp_path)
+        folder = tmp_path / "step"
+        folder.mkdir()
+        (folder / "result.pkl").touch()
+        submitted = MagicMock(folder=folder, units=[MagicMock()])
+        submitted.process.pid = 10
+
+        def finish_result(_: float) -> None:
+            with (folder / "result.pkl").open("wb") as stream:
+                pickle.dump({"status": "ok", "result": ["done"]}, stream)
+
+        with patch("artisan_submitit.srun.time.sleep", side_effect=finish_result):
+            assert router._read_result(submitted) == ["done"]

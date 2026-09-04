@@ -14,4 +14,4 @@ def test_artisan_dependency_requires_runner_api_release() -> None:
         if requirement.startswith("dexterity-artisan")
     ]
 
-    assert artisan_requirements == ["dexterity-artisan>=0.1.2a6.dev0"]
+    assert artisan_requirements == ["dexterity-artisan>=0.1.2a6"]

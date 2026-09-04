@@ -45,6 +45,8 @@ from artisan_submitit.utils import (
 logger = logging.getLogger(__name__)
 
 _MIN_LAUNCH_INTERVAL = 0.05
+_RESULT_READ_RETRIES = 5
+_RESULT_READ_DELAY = 0.1
 _SUPPORTED_EXTRAS = frozenset({"slurm_gres", "srun_args"})
 
 
@@ -91,9 +93,11 @@ class SlurmIntraLifecycleRouter(LifecycleRouter):
         self._max_poll_time = max_poll_time
         self._cancel_grace_period = cancel_grace_period
         self._submitted: list[_SrunProcess] = []
+        self._cancelling_processes: set[int] = set()
         self._cancelled_processes: set[int] = set()
         self._lock = threading.Lock()
         self._cancelled = threading.Event()
+        self._dispatch_started = False
         self._last_launch = 0.0
 
     @property
@@ -113,27 +117,35 @@ class SlurmIntraLifecycleRouter(LifecycleRouter):
         runtime_env: RuntimeEnvironment,
     ) -> None:
         """Start asynchronous, bounded launch and collection."""
+        batches = pack_units(units, self._units_per_worker)
+        with self._lock:
+            self._dispatch_started = True
         if not os.environ.get("SLURM_JOB_ID"):
             msg = (
                 "SlurmIntraRunner requires an active SLURM allocation "
                 "(SLURM_JOB_ID is not set)"
             )
             raise RuntimeError(msg)
-        batches = pack_units(units, self._units_per_worker)
         self._start_background(lambda: self._run_batches(batches, runtime_env))
 
     def cancel(self) -> None:
         """Terminate only live ``srun`` processes owned by this router."""
-        self._cancelled.set()
         with self._lock:
+            if not self._dispatch_started:
+                return
+            self._cancelled.set()
             alive = [
                 item.process
                 for item in self._submitted
                 if item.process.poll() is None
                 and id(item.process) not in self._cancelled_processes
+                and id(item.process) not in self._cancelling_processes
             ]
-            self._cancelled_processes.update(id(process) for process in alive)
-        _terminate_processes(alive, self._cancel_grace_period)
+            self._cancelling_processes.update(id(process) for process in alive)
+        terminal = _terminate_processes(alive, self._cancel_grace_period)
+        with self._lock:
+            self._cancelled_processes.update(terminal)
+            self._cancelling_processes.difference_update(id(item) for item in alive)
 
     def _run_batches(
         self,
@@ -166,14 +178,26 @@ class SlurmIntraLifecycleRouter(LifecycleRouter):
         return results
 
     def _wait_for_slot(self) -> None:
-        """Wait until fewer than the configured processes are active."""
+        """Wait for capacity while enforcing each active process deadline."""
         while True:
             if self._cancelled.is_set():
                 msg = "srun dispatch cancelled"
                 raise RuntimeError(msg)
+            now = time.monotonic()
             with self._lock:
-                active = sum(item.process.poll() is None for item in self._submitted)
-            if active < self._max_workers:
+                active = [
+                    item for item in self._submitted if item.process.poll() is None
+                ]
+            expired = [
+                item.process
+                for item in active
+                if now >= item.launched_at + self._max_poll_time
+            ]
+            if expired:
+                _terminate_processes(expired, self._cancel_grace_period)
+                time.sleep(self._poll_interval)
+                continue
+            if len(active) < self._max_workers:
                 return
             time.sleep(self._poll_interval)
 
@@ -253,7 +277,8 @@ class SlurmIntraLifecycleRouter(LifecycleRouter):
         worker_log = read_job_logs(
             submitted.folder / "stdout.log",
             submitted.folder / "stderr.log",
-            retries=1,
+            retries=5,
+            delay=_RESULT_READ_DELAY,
         )
         return _attach_worker_log(
             validate_batch_results(submitted.units, raw_results),
@@ -263,16 +288,33 @@ class SlurmIntraLifecycleRouter(LifecycleRouter):
     def _read_result(self, submitted: _SrunProcess) -> object:
         """Read the atomic worker envelope or return per-unit failures."""
         result_path = submitted.folder / "result.pkl"
-        if not result_path.exists():
+        envelope: object | None = None
+        read_error: Exception | None = None
+        for attempt in range(_RESULT_READ_RETRIES):
+            try:
+                with result_path.open("rb") as stream:
+                    envelope = pickle.load(stream)
+                break
+            except (FileNotFoundError, EOFError, pickle.UnpicklingError) as exc:
+                read_error = exc
+                with contextlib.suppress(OSError):
+                    list(result_path.parent.iterdir())
+            except OSError as exc:
+                read_error = exc
+            except Exception as exc:
+                return failure_results_for_units(submitted.units, exc)
+            if attempt < _RESULT_READ_RETRIES - 1:
+                time.sleep(_RESULT_READ_DELAY)
+        if envelope is None:
+            detail = (
+                f": {read_error}"
+                if read_error and not isinstance(read_error, FileNotFoundError)
+                else ""
+            )
             return failure_results_for_units(
                 submitted.units,
-                f"srun process {submitted.process.pid} produced no result envelope",
+                f"srun process {submitted.process.pid} produced no result envelope{detail}",
             )
-        try:
-            with result_path.open("rb") as stream:
-                envelope = pickle.load(stream)
-        except Exception as exc:
-            return failure_results_for_units(submitted.units, exc)
         if not isinstance(envelope, dict) or envelope.get("status") not in {
             "ok",
             "error",
@@ -420,7 +462,7 @@ def _resolve_srun_concurrency(
 def _terminate_processes(
     processes: list[subprocess.Popen[bytes]],
     grace_period: float,
-) -> None:
+) -> set[int]:
     """Terminate exact process handles, escalating to kill after one deadline."""
     alive = [process for process in processes if process.poll() is None]
     for process in alive:
@@ -435,3 +477,4 @@ def _terminate_processes(
                 process.kill()
             with contextlib.suppress(OSError, subprocess.TimeoutExpired):
                 process.wait(timeout=5)
+    return {id(process) for process in processes if process.poll() is not None}

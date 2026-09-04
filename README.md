@@ -41,7 +41,7 @@ its built-in local runner.
 ## Requirements
 
 - Python 3.12 or newer;
-- `dexterity-artisan` 0.1.2a6.dev0 or newer, which provides
+- `dexterity-artisan` 0.1.2a6 or newer, which provides
   `artisan.orchestration.runner_api`;
 - Submitit 1.5 or newer;
 - a shared filesystem visible at the same paths from the pipeline manager and
@@ -83,7 +83,9 @@ override task topology or Artisan's CPU, memory, GPU, and time settings; the
 runners reject those conflicts. The supported exception is `slurm_gres`, which
 overrides `RunnerResources.gpus` when you need a cluster-specific GPU request.
 The old aliases `partition` and `time_limit` are also rejected instead of
-silently translated.
+silently translated. This includes Submitit's unprefixed deprecated aliases
+such as `time`, `mem`, `ntasks_per_node`, `srun_args`,
+`additional_parameters`, and `array_parallelism`.
 
 `BatchStrategy.max_workers` controls array parallelism for `SlurmRunner` and
 simultaneous processes for `SlurmIntraRunner`. A conflicting low-level
@@ -119,11 +121,14 @@ late log flushing.
 
 Cancellation targets exact handles only:
 
-- `SlurmRunner` calls `cancel(check=False)` on jobs it submitted;
+- `SlurmRunner` checks terminal state and requires successful `scancel` for
+  jobs it submitted;
 - `SlurmIntraRunner` terminates its own `Popen` handles, waits for one grace
   period, then kills survivors.
 
 No job-name-wide `scancel` query is used.
+Cancellation before dispatch is an idle no-op, and a failed scheduler or
+process cancellation remains retryable.
 
 ## Intra-allocation execution
 

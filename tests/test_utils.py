@@ -70,3 +70,47 @@ def test_read_job_logs_combines_and_truncates(tmp_path) -> None:
     assert read_job_logs(stdout_path, stderr_path, retries=1) == (
         "hello\n--- stderr ---\nproblem"
     )
+
+
+@patch("artisan_submitit.utils.time.sleep")
+def test_read_job_logs_accepts_empty_existing_files_without_retry(
+    sleep: MagicMock,
+    tmp_path,
+) -> None:
+    stdout_path = tmp_path / "stdout.log"
+    stderr_path = tmp_path / "stderr.log"
+    stdout_path.touch()
+    stderr_path.write_text("problem")
+
+    assert read_job_logs(stdout_path, stderr_path) == "--- stderr ---\nproblem"
+    sleep.assert_not_called()
+
+
+@patch("artisan_submitit.utils.time.sleep")
+def test_read_job_logs_retries_when_either_path_is_missing(
+    sleep: MagicMock,
+    tmp_path,
+) -> None:
+    stdout_path = tmp_path / "stdout.log"
+    stderr_path = tmp_path / "stderr.log"
+    stdout_path.touch()
+
+    assert read_job_logs(stdout_path, stderr_path, retries=3, delay=0.1) is None
+    assert sleep.call_count == 2
+
+
+def test_read_job_logs_retries_delayed_stderr_visibility(tmp_path) -> None:
+    stdout_path = tmp_path / "stdout.log"
+    stderr_path = tmp_path / "stderr.log"
+    stdout_path.touch()
+
+    def publish_stderr(_: float) -> None:
+        stderr_path.write_text("late warning")
+
+    with patch(
+        "artisan_submitit.utils.time.sleep", side_effect=publish_stderr
+    ) as sleep:
+        assert read_job_logs(stdout_path, stderr_path) == (
+            "--- stderr ---\nlate warning"
+        )
+    sleep.assert_called_once()

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import logging
 import threading
+from collections.abc import Mapping
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
@@ -38,9 +40,15 @@ logger = logging.getLogger(__name__)
 
 _PORTABLE_PARAMETER_NAMES = frozenset(
     {
+        "cpus_per_gpu",
         "cpus_per_task",
         "gpus_per_node",
+        "gpus_per_task",
+        "mem",
         "mem_gb",
+        "mem_per_cpu",
+        "mem_per_gpu",
+        "num_gpus",
         "slurm_cpus_per_gpu",
         "slurm_cpus_per_task",
         "slurm_gpus_per_node",
@@ -52,12 +60,14 @@ _PORTABLE_PARAMETER_NAMES = frozenset(
         "slurm_num_gpus",
         "slurm_time",
         "slurm_timeout_min",
+        "time",
         "timeout_min",
     }
 )
 _TOPOLOGY_PARAMETER_NAMES = frozenset(
     {
         "nodes",
+        "ntasks_per_node",
         "slurm_nodes",
         "slurm_ntasks_per_node",
         "slurm_tasks_per_node",
@@ -65,7 +75,11 @@ _TOPOLOGY_PARAMETER_NAMES = frozenset(
     }
 )
 _REMOVED_PARAMETER_NAMES = {
+    "additional_parameters": "slurm_additional_parameters",
+    "array_parallelism": "slurm_array_parallelism",
+    "gres": "slurm_gres",
     "partition": "slurm_partition",
+    "srun_args": "slurm_srun_args",
     "time_limit": "RunnerResources.time_limit",
 }
 
@@ -92,10 +106,12 @@ class SlurmLifecycleRouter(LifecycleRouter):
         self._units_per_worker = units_per_worker
         self._max_array_size = max_array_size
         self._submitted: list[_SubmittedBatch] = []
+        self._cancelling_handles: set[int] = set()
         self._cancelled_handles: set[int] = set()
         self._completed_handles: set[int] = set()
         self._lock = threading.Lock()
         self._cancelled = threading.Event()
+        self._dispatch_started = False
 
     @property
     def submitted_job_ids(self) -> tuple[str, ...]:
@@ -109,26 +125,40 @@ class SlurmLifecycleRouter(LifecycleRouter):
         runtime_env: RuntimeEnvironment,
     ) -> None:
         """Start asynchronous scheduler submission and collection."""
+        with self._lock:
+            self._dispatch_started = True
         self._start_background(lambda: self._run_waves(units, runtime_env))
 
     def cancel(self) -> None:
         """Cancel only jobs submitted by this router; safe to call repeatedly."""
-        self._cancelled.set()
         with self._lock:
+            if not self._dispatch_started:
+                return
+            self._cancelled.set()
             jobs = [
                 item.job
                 for item in self._submitted
                 if id(item.job) not in self._cancelled_handles
+                and id(item.job) not in self._cancelling_handles
                 and id(item.job) not in self._completed_handles
             ]
-            self._cancelled_handles.update(id(job) for job in jobs)
+            self._cancelling_handles.update(id(job) for job in jobs)
         for job in jobs:
+            handle = id(job)
             try:
-                job.cancel(check=False)
+                if job.done() is True:
+                    with self._lock:
+                        self._completed_handles.add(handle)
+                    continue
+                job.cancel(check=True)
             except Exception:
-                with self._lock:
-                    self._cancelled_handles.discard(id(job))
                 logger.debug("Failed to cancel an owned SLURM job", exc_info=True)
+            else:
+                with self._lock:
+                    self._cancelled_handles.add(handle)
+            finally:
+                with self._lock:
+                    self._cancelling_handles.discard(handle)
 
     def _run_waves(
         self,
@@ -181,7 +211,9 @@ class SlurmLifecycleRouter(LifecycleRouter):
         submitted: list[_SubmittedBatch],
     ) -> list[UnitResult]:
         """Collect batches in submission order and attach their exact job logs."""
-        results: list[UnitResult] = []
+        if not submitted:
+            return []
+        collected: list[list[UnitResult]] = []
         for item in submitted:
             try:
                 batch_results = validate_batch_results(item.units, item.job.result())
@@ -189,9 +221,15 @@ class SlurmLifecycleRouter(LifecycleRouter):
                 batch_results = failure_results_for_units(item.units, exc)
             with self._lock:
                 self._completed_handles.add(id(item.job))
-            worker_log = _read_submitit_job_log(item.job)
-            results.extend(_attach_worker_log(batch_results, worker_log))
-        return results
+            collected.append(batch_results)
+
+        with ThreadPoolExecutor(max_workers=min(32, len(submitted))) as pool:
+            logs = pool.map(lambda item: _read_submitit_job_log(item.job), submitted)
+            return [
+                result
+                for batch_results, worker_log in zip(collected, logs, strict=True)
+                for result in _attach_worker_log(batch_results, worker_log)
+            ]
 
 
 class SlurmRunner(RunnerBase):
@@ -247,8 +285,9 @@ class SlurmRunner(RunnerBase):
             job_name,
         )
         folder = Path(log_folder or self.log_folder) / "%j"
-        executor = submitit.AutoExecutor(folder=folder)
+        executor = submitit.AutoExecutor(folder=folder, cluster="slurm")
         executor.update_parameters(**parameters)
+        _validate_effective_executor(executor, parameters)
         return SlurmLifecycleRouter(
             executor=executor,
             units_per_worker=batch_strategy.units_per_worker,
@@ -369,6 +408,68 @@ def _validate_additional_parameters(value: object) -> None:
             "slurm_additional_parameters cannot override Artisan-managed "
             f"options: {names}"
         )
+        raise ValueError(msg)
+
+
+def _validate_effective_executor(
+    executor: submitit.AutoExecutor,
+    expected: dict[str, Any],
+) -> None:
+    """Ensure Submitit's canonical parameters preserve Artisan's invariants."""
+    parameters = executor.parameters
+    _validate_effective_topology(parameters)
+    _validate_effective_resources(parameters, expected)
+    reject_managed_scheduler_arguments(
+        parameters.get("srun_args", []), "effective slurm_srun_args"
+    )
+    _validate_additional_parameters(parameters.get("additional_parameters"))
+
+
+def _validate_effective_topology(parameters: Mapping[str, Any]) -> None:
+    """Reject topology changes after Submitit has canonicalized aliases."""
+    if parameters.get("nodes", 1) != 1 or parameters.get("ntasks_per_node") not in {
+        None,
+        1,
+    }:
+        msg = "Submitit canonicalization changed Artisan's single-task topology"
+        raise ValueError(msg)
+
+
+def _validate_effective_resources(
+    parameters: Mapping[str, Any],
+    expected: Mapping[str, Any],
+) -> None:
+    """Verify canonical portable values and array concurrency were not replaced."""
+    comparisons = {
+        "time": expected["timeout_min"],
+        "cpus_per_task": expected["cpus_per_task"],
+        "array_parallelism": expected["slurm_array_parallelism"],
+    }
+    for name, value in comparisons.items():
+        if parameters.get(name) != value:
+            msg = f"Submitit canonicalization changed Artisan-managed {name!r}"
+            raise ValueError(msg)
+    forbidden = (
+        "cpus_per_gpu",
+        "gpus_per_task",
+        "mem_per_cpu",
+        "mem_per_gpu",
+        "num_gpus",
+    )
+    if any(parameters.get(name) is not None for name in forbidden):
+        msg = "Submitit canonicalization introduced conflicting portable resources"
+        raise ValueError(msg)
+    expected_memory = f"{expected['mem_gb']}GB"
+    if parameters.get("mem") != expected_memory:
+        msg = "Submitit canonicalization changed Artisan-managed memory"
+        raise ValueError(msg)
+    expected_gres = expected.get("slurm_gres")
+    expected_gpus = None if expected_gres else expected.get("gpus_per_node")
+    if parameters.get("gres") != expected_gres:
+        msg = "Submitit canonicalization changed Artisan-managed GPU resources"
+        raise ValueError(msg)
+    if parameters.get("gpus_per_node") != expected_gpus:
+        msg = "Submitit canonicalization changed Artisan-managed GPU count"
         raise ValueError(msg)
 
 

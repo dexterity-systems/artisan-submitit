@@ -42,6 +42,11 @@ and managed flags hidden in `slurm_srun_args` or
 scheduler policy such as partition, account, constraint, and QoS remains
 provider configuration.
 
+`SlurmRunner` forces Submitit's SLURM executor. It fails immediately when
+SLURM commands are unavailable rather than falling back to local execution.
+Submitit's deprecated unprefixed resource, topology, srun, additional
+parameter, and array-parallelism aliases are rejected.
+
 `slurm_gres` is the supported exception for clusters that need a custom GPU
 resource string. When set on the runner or in `RunnerResources.extra`, it
 overrides `RunnerResources.gpus`.

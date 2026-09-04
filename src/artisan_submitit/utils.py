@@ -184,16 +184,16 @@ def read_job_logs(
     stdout_path: Path,
     stderr_path: Path,
     retries: int = 5,
-    delay: float = 1.0,
+    delay: float = 0.1,
 ) -> str | None:
-    """Read and combine worker logs after invalidating NFS metadata caches."""
-    stdout = ""
+    """Read both worker logs after bounded NFS metadata-cache refreshes."""
+    stdout = stderr = ""
     for attempt in range(retries):
-        stdout = _read_text_nfs_safe(stdout_path)
-        if stdout or attempt == retries - 1:
+        stdout_exists, stdout = _read_text_nfs_safe(stdout_path)
+        stderr_exists, stderr = _read_text_nfs_safe(stderr_path)
+        if (stdout_exists and stderr_exists) or attempt == retries - 1:
             break
         time.sleep(delay)
-    stderr = _read_text_nfs_safe(stderr_path)
 
     parts = []
     if stdout:
@@ -203,19 +203,19 @@ def read_job_logs(
     return "\n".join(parts) or None
 
 
-def _read_text_nfs_safe(path: Path) -> str:
+def _read_text_nfs_safe(path: Path) -> tuple[bool, str]:
     """Read a text file after forcing an NFS attribute-cache refresh."""
     if not path.exists():
         with contextlib.suppress(OSError):
             list(path.parent.iterdir())
         if not path.exists():
-            return ""
+            return False, ""
     try:
         fd = os.open(path, os.O_RDONLY)
         try:
             os.fstat(fd)
         finally:
             os.close(fd)
-        return path.read_text(errors="replace")
+        return True, path.read_text(errors="replace")
     except OSError:
-        return ""
+        return False, ""

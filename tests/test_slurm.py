@@ -15,7 +15,11 @@ from artisan.orchestration.runner_api import (
     UnitResult,
 )
 
-from artisan_submitit.slurm import SlurmLifecycleRouter, SlurmRunner
+from artisan_submitit.slurm import (
+    SlurmLifecycleRouter,
+    SlurmRunner,
+    _validate_effective_executor,
+)
 
 
 def _units(count: int) -> list[MagicMock]:
@@ -89,7 +93,17 @@ class TestSlurmRunner:
                 RunnerResources(), BatchStrategy(max_workers=0), 0, "op"
             )
 
-    @pytest.mark.parametrize("alias", ["partition", "time_limit"])
+    @pytest.mark.parametrize(
+        "alias",
+        [
+            "additional_parameters",
+            "array_parallelism",
+            "gres",
+            "partition",
+            "srun_args",
+            "time_limit",
+        ],
+    )
     def test_removed_parameter_alias_fails_fast(self, alias: str) -> None:
         with pytest.raises(ValueError, match="Submitit-native"):
             SlurmRunner(**{alias: "bad"})
@@ -97,7 +111,28 @@ class TestSlurmRunner:
     @pytest.mark.parametrize(
         "parameter",
         [
+            "cpus_per_gpu",
+            "cpus_per_task",
+            "gpus_per_node",
+            "gpus_per_task",
+            "mem",
+            "mem_gb",
+            "mem_per_cpu",
+            "mem_per_gpu",
+            "num_gpus",
+            "time",
+            "timeout_min",
+        ],
+    )
+    def test_deprecated_portable_alias_fails_fast(self, parameter: str) -> None:
+        with pytest.raises(ValueError, match="RunnerResources"):
+            SlurmRunner(**{parameter: 2})
+
+    @pytest.mark.parametrize(
+        "parameter",
+        [
             "nodes",
+            "ntasks_per_node",
             "tasks_per_node",
             "slurm_nodes",
             "slurm_tasks_per_node",
@@ -223,6 +258,18 @@ class TestSlurmRunner:
         tmp_path,
     ) -> None:
         del max_array_size
+        executor_type.return_value.parameters = {
+            "nodes": 1,
+            "ntasks_per_node": None,
+            "time": 60,
+            "cpus_per_task": 1,
+            "array_parallelism": 1000,
+            "mem": "4GB",
+            "gres": None,
+            "gpus_per_node": None,
+            "srun_args": ["--export=ALL"],
+            "additional_parameters": None,
+        }
         runner = SlurmRunner()
         router = runner.create_lifecycle_router(
             RunnerResources(),
@@ -233,8 +280,68 @@ class TestSlurmRunner:
         )
 
         assert isinstance(router, SlurmLifecycleRouter)
-        executor_type.assert_called_once_with(folder=tmp_path / "%j")
+        executor_type.assert_called_once_with(folder=tmp_path / "%j", cluster="slurm")
         executor_type.return_value.update_parameters.assert_called_once()
+
+    def test_effective_submitit_state_is_validated(self) -> None:
+        executor = MagicMock()
+        executor.parameters = {
+            "nodes": 1,
+            "ntasks_per_node": 4,
+            "time": 5,
+            "cpus_per_task": 1,
+            "array_parallelism": 2,
+        }
+        expected = {
+            "timeout_min": 5,
+            "cpus_per_task": 1,
+            "slurm_array_parallelism": 2,
+        }
+
+        with pytest.raises(ValueError, match="single-task topology"):
+            _validate_effective_executor(executor, expected)
+
+    @patch("submitit.slurm.slurm.SlurmExecutor.affinity", return_value=0)
+    def test_create_router_fails_instead_of_falling_back_locally(
+        self,
+        affinity: MagicMock,
+        tmp_path,
+    ) -> None:
+        del affinity
+        with pytest.raises(RuntimeError, match='Could not detect "srun"'):
+            SlurmRunner().create_lifecycle_router(
+                RunnerResources(), BatchStrategy(), 0, "op", str(tmp_path)
+            )
+
+    @pytest.mark.parametrize(
+        ("alias", "value"),
+        [
+            ("time", 99),
+            ("mem", "8G"),
+            ("ntasks_per_node", 4),
+            ("srun_args", ["-n4"]),
+            ("additional_parameters", {"nodes": 2}),
+            ("array_parallelism", 999),
+        ],
+    )
+    @patch("submitit.slurm.slurm.SlurmExecutor.affinity", return_value=1)
+    def test_real_submitit_canonical_aliases_are_rejected(
+        self,
+        affinity: MagicMock,
+        alias: str,
+        value: object,
+        tmp_path,
+    ) -> None:
+        del affinity
+        executor = submitit.AutoExecutor(folder=tmp_path, cluster="slurm")
+        with pytest.warns(UserWarning, match="deprecated"):
+            executor.update_parameters(**{alias: value})
+        assert executor.parameters[alias] == value
+
+        with pytest.raises(
+            ValueError, match=r"RunnerResources|Submitit-native|one task"
+        ):
+            SlurmRunner(**{alias: value})
 
 
 class TestSlurmLifecycleRouter:
@@ -468,7 +575,7 @@ class TestSlurmLifecycleRouter:
         router._thread.join(timeout=2)
 
         router.collect()
-        job.cancel.assert_called_once_with(check=False)
+        job.cancel.assert_called_once_with(check=True)
 
     def test_cancellation_synthesizes_failures_for_unsubmitted_waves(
         self, tmp_path
@@ -503,7 +610,7 @@ class TestSlurmLifecycleRouter:
         assert all(not result.success for result in results)
         assert "scheduler job cancelled" in results[0].error
         assert all("before submission" in result.error for result in results[1:])
-        job.cancel.assert_called_once_with(check=False)
+        job.cancel.assert_called_once_with(check=True)
 
     def test_dispatch_precondition_failure_completes_with_failures(self) -> None:
         router = SlurmLifecycleRouter(
@@ -551,13 +658,43 @@ class TestSlurmLifecycleRouter:
             jobs.append(job)
         executor.submit.side_effect = jobs
         router = SlurmLifecycleRouter(executor, units_per_worker=1, max_array_size=10)
+        router._dispatch_started = True
         router._submit_array([_units(1), _units(1)], MagicMock())
 
         router.cancel()
         router.cancel()
 
         for job in jobs:
-            job.cancel.assert_called_once_with(check=False)
+            job.cancel.assert_called_once_with(check=True)
+
+    def test_failed_cancellation_is_retried(self) -> None:
+        job = MagicMock(job_id="123_0")
+        job.done.return_value = False
+        job.cancel.side_effect = [RuntimeError("scancel failed"), None]
+        executor = MagicMock()
+        executor.submit.return_value = job
+        router = SlurmLifecycleRouter(executor, units_per_worker=1, max_array_size=1)
+        router._dispatch_started = True
+        router._submit_array([_units(1)], MagicMock())
+
+        router.cancel()
+        router.cancel()
+
+        assert job.cancel.call_count == 2
+        assert job.cancel.call_args_list[0].kwargs == {"check": True}
+
+    def test_terminal_job_is_not_cancelled(self) -> None:
+        job = MagicMock(job_id="123_0")
+        job.done.return_value = True
+        executor = MagicMock()
+        executor.submit.return_value = job
+        router = SlurmLifecycleRouter(executor, units_per_worker=1, max_array_size=1)
+        router._dispatch_started = True
+        router._submit_array([_units(1)], MagicMock())
+
+        router.cancel()
+
+        job.cancel.assert_not_called()
 
     def test_cancel_after_collection_does_not_cancel_completed_jobs(
         self, tmp_path
@@ -578,7 +715,7 @@ class TestSlurmLifecycleRouter:
 
         job.cancel.assert_not_called()
 
-    def test_job_added_after_cancel_is_not_leaked(self) -> None:
+    def test_idle_cancel_does_not_poison_later_dispatch(self) -> None:
         job = MagicMock(job_id="123_0")
         executor = MagicMock()
         executor.submit.return_value = job
@@ -587,4 +724,5 @@ class TestSlurmLifecycleRouter:
 
         router._submit_array([_units(1)], MagicMock())
 
-        job.cancel.assert_called_once_with(check=False)
+        job.cancel.assert_not_called()
+        assert not router._cancelled.is_set()

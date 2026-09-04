@@ -44,4 +44,6 @@ such as `--exclusive`. Conflicting flags and unsupported extras fail fast.
 Each process executes a cloudpickle-serialized callable and atomically renames
 its completed result envelope into place. A nonzero worker exit or missing
 envelope becomes an ordered failure result. Cancellation acts only on processes
-created by that router.
+created by that router. Process deadlines remain enforced while launch
+concurrency is saturated, and result/log reads use bounded retries for shared
+filesystem visibility delays.
