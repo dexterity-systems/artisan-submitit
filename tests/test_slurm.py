@@ -79,6 +79,19 @@ class TestSlurmRunner:
         assert "gpus_per_node" not in parameters
         assert "using slurm_gres" in caplog.text
 
+    @pytest.mark.parametrize("slurm_gres", [None, ""])
+    def test_empty_slurm_gres_does_not_drop_portable_gpu(
+        self, slurm_gres: str | None
+    ) -> None:
+        runner = SlurmRunner(slurm_gres=slurm_gres)
+
+        parameters = runner._executor_parameters(
+            RunnerResources(gpus=2), BatchStrategy(), 0, "op"
+        )
+
+        assert parameters["gpus_per_node"] == 2
+        assert "slurm_gres" not in parameters
+
     def test_max_workers_conflict_fails_fast(self) -> None:
         runner = SlurmRunner(slurm_array_parallelism=5)
         with pytest.raises(ValueError, match="conflicts"):
@@ -251,13 +264,16 @@ class TestSlurmRunner:
 
     @patch("artisan_submitit.slurm.get_cluster_max_array_size", return_value=100)
     @patch("artisan_submitit.slurm.submitit.AutoExecutor")
+    @patch("artisan_submitit.slurm.uuid.uuid4")
     def test_create_router_configures_auto_executor(
         self,
+        uuid4: MagicMock,
         executor_type: MagicMock,
         max_array_size: MagicMock,
         tmp_path,
     ) -> None:
         del max_array_size
+        uuid4.return_value.hex = "router-abc"
         executor_type.return_value.parameters = {
             "nodes": 1,
             "ntasks_per_node": None,
@@ -280,7 +296,9 @@ class TestSlurmRunner:
         )
 
         assert isinstance(router, SlurmLifecycleRouter)
-        executor_type.assert_called_once_with(folder=tmp_path / "%j", cluster="slurm")
+        executor_type.assert_called_once_with(
+            folder=tmp_path / "router-abc" / "%j", cluster="slurm"
+        )
         executor_type.return_value.update_parameters.assert_called_once()
 
     def test_effective_submitit_state_is_validated(self) -> None:

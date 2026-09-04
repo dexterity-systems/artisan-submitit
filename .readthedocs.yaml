@@ -6,6 +6,7 @@ build:
     python: "3.12"
     nodejs: "20"
   commands:
+    - git clone --depth 1 https://github.com/dexterity-systems/artisan.git ../artisan
     - curl -fsSL https://pixi.sh/install.sh | bash
     - $HOME/.pixi/bin/pixi install --locked --environment docs
     - $HOME/.pixi/bin/pixi run --locked -e docs docs-build

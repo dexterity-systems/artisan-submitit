@@ -205,8 +205,8 @@ Artisan's source-build fallback allows its editable install even when a mounted
 worktree's `.git` pointer refers to metadata outside the container. Both mounted
 source trees are also placed on `PYTHONPATH` for submitted jobs.
 
-See [docker/README.md](docker/README.md) for environment details and
-[examples/](examples/) for runnable pipelines.
+See the [Docker environment](https://github.com/dexterity-systems/artisan-submitit/blob/main/docker/README.md)
+and [runnable examples](https://github.com/dexterity-systems/artisan-submitit/tree/main/examples).
 
 ## Migrating from built-in Artisan SLURM runners
 
@@ -225,4 +225,4 @@ resuming such a pipeline requires supplying the matching provider instance.
 
 ## License
 
-BSD 3-Clause. See [LICENSE](LICENSE).
+BSD 3-Clause. See the [license](https://github.com/dexterity-systems/artisan-submitit/blob/main/LICENSE).

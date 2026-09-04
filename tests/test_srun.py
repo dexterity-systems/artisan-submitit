@@ -81,6 +81,11 @@ class TestSlurmIntraRunner:
         with pytest.raises(ValueError, match="max_poll_time"):
             SlurmIntraRunner(max_poll_time=0)
 
+    @pytest.mark.parametrize("value", [True, 1.5, "2"])
+    def test_non_integer_launch_concurrency_fails_fast(self, value: object) -> None:
+        with pytest.raises(ValueError, match="positive integer"):
+            SlurmIntraRunner(srun_launch_concurrency=value)  # type: ignore[arg-type]
+
     def test_unsupported_resource_extra_fails_fast(self) -> None:
         runner = SlurmIntraRunner()
         with pytest.raises(ValueError, match="Unsupported"):
@@ -119,6 +124,7 @@ class TestSlurmIntraRunner:
             ["-B2:4:1"],
             ["--time=01:00:00"],
             ["-t60"],
+            ["--threads=2"],
         ],
     )
     def test_managed_srun_argument_fails_fast(self, arguments: list[str]) -> None:

@@ -53,8 +53,9 @@ def test_get_cluster_max_array_size_falls_back(mock_run: MagicMock) -> None:
 
 def test_get_cluster_max_array_size_uses_override() -> None:
     assert get_cluster_max_array_size(17) == 17
-    with pytest.raises(ValueError, match="must be >= 1"):
-        get_cluster_max_array_size(0)
+    for invalid in (0, True, 1.5):
+        with pytest.raises(ValueError, match="positive integer"):
+            get_cluster_max_array_size(invalid)  # type: ignore[arg-type]
 
 
 def test_chunked_preserves_order_and_remainder() -> None:

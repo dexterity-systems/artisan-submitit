@@ -78,8 +78,11 @@ def is_managed_scheduler_option(option: str) -> bool:
     if option in _MANAGED_SCHEDULER_SHORT_OPTIONS:
         return True
     name = option.lstrip("-").split("=", maxsplit=1)[0].replace("_", "-").lower()
-    return name in _MANAGED_SCHEDULER_OPTION_NAMES or name.startswith(
-        _MANAGED_SCHEDULER_OPTION_PREFIXES
+    return (
+        name in _MANAGED_SCHEDULER_OPTION_NAMES
+        or name.startswith(_MANAGED_SCHEDULER_OPTION_PREFIXES)
+        or any(managed.startswith(name) for managed in _MANAGED_SCHEDULER_OPTION_NAMES)
+        or any(prefix.startswith(name) for prefix in _MANAGED_SCHEDULER_OPTION_PREFIXES)
     )
 
 
@@ -148,8 +151,8 @@ def get_cluster_max_array_size(override: int | None = None) -> int:
         ValueError: If an explicit override is not positive.
     """
     if override is not None:
-        if override < 1:
-            msg = f"max_array_size must be >= 1, got {override}"
+        if type(override) is not int or override < 1:
+            msg = f"max_array_size must be a positive integer, got {override!r}"
             raise ValueError(msg)
         return override
 

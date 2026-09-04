@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import uuid
 from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
@@ -284,7 +285,7 @@ class SlurmRunner(RunnerBase):
             step_number,
             job_name,
         )
-        folder = Path(log_folder or self.log_folder) / "%j"
+        folder = Path(log_folder or self.log_folder) / uuid.uuid4().hex / "%j"
         executor = submitit.AutoExecutor(folder=folder, cluster="slurm")
         executor.update_parameters(**parameters)
         _validate_effective_executor(executor, parameters)
@@ -319,13 +320,15 @@ class SlurmRunner(RunnerBase):
             "slurm_job_name": f"s{step_number}_{job_name}",
             "slurm_srun_args": ["--export=ALL"],
         }
-        if "slurm_gres" in extras:
+        slurm_gres = extras.pop("slurm_gres", None)
+        if slurm_gres:
+            parameters["slurm_gres"] = slurm_gres
             if resources.gpus:
                 logger.warning(
                     "Both RunnerResources.gpus=%s and slurm_gres=%s were set; "
                     "using slurm_gres",
                     resources.gpus,
-                    extras["slurm_gres"],
+                    slurm_gres,
                 )
         elif resources.gpus:
             parameters["gpus_per_node"] = resources.gpus
@@ -388,6 +391,10 @@ def _validate_provider_parameters(parameters: dict[str, Any]) -> None:
         names = ", ".join(sorted(topology))
         msg = f"Artisan Submitit jobs require one task; unsupported options: {names}"
         raise ValueError(msg)
+    slurm_gres = parameters.get("slurm_gres")
+    if slurm_gres is not None and not isinstance(slurm_gres, str):
+        msg = "slurm_gres must be a string"
+        raise TypeError(msg)
     srun_arguments = parameters.get("slurm_srun_args")
     if srun_arguments is not None:
         reject_managed_scheduler_arguments(srun_arguments, "slurm_srun_args")

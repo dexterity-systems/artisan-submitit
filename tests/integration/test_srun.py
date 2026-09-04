@@ -12,7 +12,7 @@ from artisan.orchestration import PipelineManager
 
 from artisan_submitit import SlurmIntraRunner
 
-pytestmark = (pytest.mark.integration, pytest.mark.slurm)
+pytestmark = [pytest.mark.integration, pytest.mark.slurm]
 
 
 def _pipeline(tmp_path: Path, name: str) -> PipelineManager:
