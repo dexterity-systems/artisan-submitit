@@ -1,0 +1,24 @@
+name: artisan-submitit
+
+services:
+  slurm:
+    build: .
+    image: artisan-submitit-slurm:dev
+    hostname: slurm-node
+    working_dir: /workspace/artisan-submitit
+    volumes:
+      - ..:/workspace/artisan-submitit
+      - ${ARTISAN_WORKTREE:-../../artisan}:/workspace/artisan
+      - pixi-env:/pixi-env
+    environment:
+      ARTISAN_DOCKER_GID: ${ARTISAN_DOCKER_GID:-1000}
+      ARTISAN_DOCKER_UID: ${ARTISAN_DOCKER_UID:-1000}
+      ARTISAN_WORKTREE: /workspace/artisan
+      PYTHONPATH: /workspace/artisan/src:/workspace/artisan-submitit/src:/workspace/artisan-submitit
+      PYTHONDONTWRITEBYTECODE: "1"
+      SLURM_TEST_PARTITION: debug
+    tty: true
+    stdin_open: true
+
+volumes:
+  pixi-env:
