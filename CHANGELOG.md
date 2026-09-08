@@ -21,7 +21,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   topology options. Empty GRES overrides preserve portable GPU requests, and
   array/intra-allocation concurrency limits require positive integers.
 - Cancellation retries transient scheduler/process failures through core's
-  idempotent lifecycle contract.
+  idempotent lifecycle contract. Successfully cancelled SLURM handles bypass
+  Submitit's cached result wait so provider collection settles before Artisan
+  finalization returns.
 - Docker integration modules collect under pytest 9; real `sbatch` and `srun`
   suites exercise the package against the inherited Prefect Submitit container.
 - Submitit result/log directories are unique per router invocation, preventing

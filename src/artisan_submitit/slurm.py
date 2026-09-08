@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 import uuid
 from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
@@ -216,10 +217,7 @@ class SlurmLifecycleRouter(LifecycleRouter):
             return []
         collected: list[list[UnitResult]] = []
         for item in submitted:
-            try:
-                batch_results = validate_batch_results(item.units, item.job.result())
-            except Exception as exc:
-                batch_results = failure_results_for_units(item.units, exc)
+            batch_results = self._collect_job(item)
             with self._lock:
                 self._completed_handles.add(id(item.job))
             collected.append(batch_results)
@@ -231,6 +229,23 @@ class SlurmLifecycleRouter(LifecycleRouter):
                 for batch_results, worker_log in zip(collected, logs, strict=True)
                 for result in _attach_worker_log(batch_results, worker_log)
             ]
+
+    def _collect_job(self, item: _SubmittedBatch) -> list[UnitResult]:
+        """Wait for one job without trapping collection inside Submitit's cache."""
+        handle = id(item.job)
+        try:
+            while item.job.done() is not True:
+                with self._lock:
+                    cancelled = handle in self._cancelled_handles
+                if cancelled:
+                    return failure_results_for_units(item.units, "SLURM job cancelled")
+                if self._cancelled.is_set():
+                    time.sleep(0.1)
+                else:
+                    self._cancelled.wait(timeout=1.0)
+            return validate_batch_results(item.units, item.job.result())
+        except Exception as exc:
+            return failure_results_for_units(item.units, exc)
 
 
 class SlurmRunner(RunnerBase):

@@ -372,6 +372,7 @@ class TestSlurmLifecycleRouter:
         stdout = tmp_path / "stdout"
         stdout.write_text("completed")
         job = MagicMock(job_id="99_0")
+        job.done.return_value = True
         job.result.return_value = [_result(0)]
         job.paths = SimpleNamespace(stdout=stdout, stderr=tmp_path / "stderr")
         executor = MagicMock()
@@ -410,6 +411,7 @@ class TestSlurmLifecycleRouter:
         ):
             job = MagicMock()
             job.job_id = f"99_{index}"
+            job.done.return_value = True
             job.result.return_value = batch_results
             job.paths = SimpleNamespace(
                 stdout=tmp_path / f"out_{index}",
@@ -448,6 +450,7 @@ class TestSlurmLifecycleRouter:
             stdout = tmp_path / f"wave_out_{index}"
             stdout.write_text("completed")
             job = MagicMock(job_id=f"44_{index}")
+            job.done.return_value = True
             job.paths = SimpleNamespace(
                 stdout=stdout,
                 stderr=tmp_path / f"wave_err_{index}",
@@ -484,6 +487,7 @@ class TestSlurmLifecycleRouter:
     def test_malformed_batch_becomes_one_failure_per_unit(self, tmp_path) -> None:
         job = MagicMock()
         job.job_id = "12_0"
+        job.done.return_value = True
         job.result.return_value = [_result(0)]
         job.paths = SimpleNamespace(
             stdout=tmp_path / "stdout",
@@ -503,6 +507,7 @@ class TestSlurmLifecycleRouter:
     def test_job_exception_becomes_ordered_failure_results(self, tmp_path) -> None:
         job = MagicMock()
         job.job_id = "12_0"
+        job.done.return_value = True
         job.result.side_effect = RuntimeError("node failed")
         job.paths = SimpleNamespace(
             stdout=tmp_path / "stdout",
@@ -523,6 +528,7 @@ class TestSlurmLifecycleRouter:
         self, tmp_path
     ) -> None:
         first_job = MagicMock(job_id="21_0")
+        first_job.done.return_value = True
         first_job.result.return_value = [_result(0)]
         first_job.paths = SimpleNamespace(
             stdout=tmp_path / "first_stdout",
@@ -565,6 +571,7 @@ class TestSlurmLifecycleRouter:
         stdout = tmp_path / "promotion_stdout"
         stdout.write_text("completed")
         job = MagicMock(job_id="54_0")
+        job.done.return_value = False
         job.result.return_value = [_result(0)]
         job.paths = SimpleNamespace(
             stdout=stdout,
@@ -605,12 +612,12 @@ class TestSlurmLifecycleRouter:
         job = MagicMock(job_id="55_0")
         job.paths = SimpleNamespace(stdout=stdout, stderr=tmp_path / "cancel_stderr")
 
-        def cancelled_result():
+        def pending_result() -> bool:
             collection_started.set()
             release_collection.wait(timeout=2)
-            raise RuntimeError("scheduler job cancelled")
+            return False
 
-        job.result.side_effect = cancelled_result
+        job.done.side_effect = pending_result
         executor = MagicMock()
         executor.submit.return_value = job
         router = SlurmLifecycleRouter(executor, units_per_worker=1, max_array_size=1)
@@ -626,9 +633,12 @@ class TestSlurmLifecycleRouter:
         assert executor.submit.call_count == 1
         assert len(results) == 3
         assert all(not result.success for result in results)
-        assert "scheduler job cancelled" in results[0].error
+        assert "SLURM job cancelled" in results[0].error
         assert all("before submission" in result.error for result in results[1:])
         job.cancel.assert_called_once_with(check=True)
+        job.result.assert_not_called()
+        assert router._thread is not None
+        assert not router._thread.is_alive()
 
     def test_dispatch_precondition_failure_completes_with_failures(self) -> None:
         router = SlurmLifecycleRouter(
@@ -650,6 +660,7 @@ class TestSlurmLifecycleRouter:
         stderr.write_text("worker warning")
         job = MagicMock()
         job.job_id = "12_0"
+        job.done.return_value = True
         job.result.return_value = [_result(0), _result(1)]
         job.paths = SimpleNamespace(stdout=stdout, stderr=stderr)
         executor = MagicMock()
@@ -718,6 +729,7 @@ class TestSlurmLifecycleRouter:
         self, tmp_path
     ) -> None:
         job = MagicMock(job_id="123_0")
+        job.done.return_value = True
         job.result.return_value = [_result(0)]
         job.paths = SimpleNamespace(
             stdout=tmp_path / "stdout",
