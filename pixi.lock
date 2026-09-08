@@ -1124,8 +1124,8 @@ packages:
   requires_python: '>=3.8'
 - pypi: ./
   name: artisan-submitit
-  version: 0.0.1.dev11+g409fb1cd8.d20260904
-  sha256: aea8691f0bbe8acdb74413c7c224e70fa4d78f930baf6c7bf7f80e596d33202b
+  version: 0.0.1.dev14+gcbafe82be.d20260908
+  sha256: 7b4b187692a57ef9c36171816542bb47063d31a291a01a793506f54d911df66b
   requires_dist:
   - cloudpickle>=3,<4
   - dexterity-artisan>=0.2.0
