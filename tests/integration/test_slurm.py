@@ -243,7 +243,7 @@ def test_operation_failure_and_worker_log_are_preserved(tmp_path: Path) -> None:
     assert "artisan-submitit worker log marker" in worker_log
 
 
-def test_submission_failure_becomes_aligned_step_failure(tmp_path: Path) -> None:
+def test_submission_failure_preserves_unresolved_admission(tmp_path: Path) -> None:
     pipeline = _pipeline(tmp_path, "slurm_submission_failure")
     step = pipeline.run(
         DataGenerator,
@@ -253,7 +253,9 @@ def test_submission_failure_becomes_aligned_step_failure(tmp_path: Path) -> None
     summary = pipeline.finalize()
 
     assert summary["overall_success"] is False
-    assert step.failed_count == 1
+    _assert_cancellation(
+        tmp_path / "delta", step, StepStatus.FAILED, CancellationStatus.UNKNOWN
+    )
 
 
 @pytest.mark.parametrize("operation", [ObservableWait, ManagedWait])
@@ -269,14 +271,16 @@ def test_running_cancel_preserves_unrelated_same_named_job(
     unrelated = submitit.AutoExecutor(folder=tmp_path / "unrelated" / "%j")
     unrelated.update_parameters(
         slurm_partition=PARTITION,
-        timeout_min=3,
+        timeout_min=5,
         cpus_per_task=1,
         mem_gb=1,
-        slurm_job_name="s0_wait",
+        slurm_job_name="artisan-cancel-isolation",
     )
     unrelated_job = unrelated.submit(_unrelated_heartbeat, heartbeat, stop)
     pipeline = _pipeline(tmp_path / "pipeline", "cancel_isolation")
-    runner = SlurmRunner(slurm_partition=PARTITION)
+    runner = SlurmRunner(
+        slurm_partition=PARTITION, slurm_job_name="artisan-cancel-isolation"
+    )
     routers = _observe_routers(runner, monkeypatch)
     marker = tmp_path / "owned-marker"
     try:
@@ -289,7 +293,7 @@ def test_running_cancel_preserves_unrelated_same_named_job(
             name="wait",
             params={"duration": 60, "marker_root": str(marker)},
             step_runner=runner,
-            runner_resources={"cpus": 1, "memory_gb": 1, "time_limit": "00:02:00"},
+            runner_resources={"cpus": 1, "memory_gb": 1, "time_limit": "00:05:00"},
         )
         _wait_for(
             lambda: (marker / "ready").exists()
@@ -340,7 +344,7 @@ def test_running_cancel_preserves_unrelated_same_named_job(
 def test_queued_cancel_has_non_start_accounting_evidence(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    record_property: Callable[[str, object], None],
+    record_testsuite_property: Callable[[str, object], None],
 ) -> None:
     """Qualify non-start proof, preserving uncertainty when it is unavailable."""
     pipeline = _pipeline(tmp_path, "queued_cancellation")
@@ -385,8 +389,8 @@ def test_queued_cancel_has_non_start_accounting_evidence(
             )
         except ValueError:
             qualified = False
-        record_property("queued_accounting", str(state))
-        record_property("queued_non_start_proof", qualified)
+        record_testsuite_property("queued_accounting", str(state))
+        record_testsuite_property("queued_non_start_proof", qualified)
         _assert_cancellation(
             tmp_path / "delta",
             result,
