@@ -8,6 +8,7 @@ import math
 import os
 import re
 import subprocess
+import tempfile
 import time
 from collections.abc import Sequence
 from pathlib import Path
@@ -42,6 +43,19 @@ _MANAGED_SCHEDULER_OPTION_PREFIXES = (
 _MANAGED_SCHEDULER_SHORT_OPTIONS = frozenset({"-B", "-G", "-N", "-S", "-c", "-n", "-t"})
 
 logger = logging.getLogger(__name__)
+
+
+def write_atomic(path: Path, data: bytes) -> None:
+    """Publish bytes by same-directory replacement for shared-filesystem readers."""
+    descriptor, temporary = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(data)
+        Path(temporary).replace(path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            Path(temporary).unlink()
+        raise
 
 
 def reject_managed_scheduler_arguments(

@@ -6,16 +6,15 @@ operation failures are already represented by Artisan ``UnitResult`` values.
 
 from __future__ import annotations
 
-import contextlib
-import os
 import pickle
 import sys
-import tempfile
 import traceback
 from pathlib import Path
 from typing import Any
 
 import cloudpickle
+
+from artisan_submitit.utils import write_atomic
 
 
 def main(job_folder: str) -> None:
@@ -34,23 +33,9 @@ def main(job_folder: str) -> None:
             "type": type(exc).__name__,
             "traceback": traceback.format_exc(),
         }
-    _write_atomic(folder / "result.pkl", envelope)
-
-
-def _write_atomic(path: Path, value: object) -> None:
-    """Write a pickle via same-directory rename for atomic visibility."""
-    file_descriptor, temporary_path = tempfile.mkstemp(
-        dir=path.parent,
-        suffix=".tmp",
+    write_atomic(
+        folder / "result.pkl", pickle.dumps(envelope, protocol=pickle.HIGHEST_PROTOCOL)
     )
-    try:
-        with os.fdopen(file_descriptor, "wb") as stream:
-            pickle.dump(value, stream, protocol=pickle.HIGHEST_PROTOCOL)
-        Path(temporary_path).replace(path)
-    except BaseException:
-        with contextlib.suppress(OSError):
-            Path(temporary_path).unlink()
-        raise
 
 
 if __name__ == "__main__":
