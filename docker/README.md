@@ -8,7 +8,7 @@ the integration suite checks real scheduler state through `sacct`.
 ## Start the cluster
 
 Use real sibling checkouts when refreshing the host Pixi lock. CI currently
-qualifies Artisan `ea7bf621b4e2e293d3e6c7c1f82099e44fe48bd8` from
+qualifies Artisan's `main` branch from
 `andrewcolinhunt/artisan-dev`. Point `ARTISAN_WORKTREE` at that checkout with an
 absolute path; Compose resolves relative paths from this `docker/` directory:
 
@@ -31,7 +31,7 @@ Inside the container, install both editable projects and run the tests:
 
 ```bash
 pixi install --locked -e dev
-pixi run --locked -e dev python scripts/verify_sources.py /workspace/artisan /workspace/artisan-submitit ea7bf621b4e2e293d3e6c7c1f82099e44fe48bd8
+pixi run --locked -e dev python scripts/verify_sources.py /workspace/artisan /workspace/artisan-submitit main
 pixi run --locked -e dev test-sbatch-docker
 pixi run --locked -e dev test-srun-docker
 ```
@@ -52,9 +52,9 @@ host when the dependency set changes.
 
 For release qualification, record both Git revisions, imported module paths,
 the `debug` partition/allocation, and each suite's pass/fail/skip counts. The
-source verification command prints the revisions and rejects a different core
-or imports outside the mounted source trees. Use independent clones when you
-need to keep your development checkouts unchanged.
+source verification command resolves the requested branch or commit, prints the
+revisions, and rejects a different core or imports outside the mounted source
+trees. Use independent clones to keep your development checkouts unchanged.
 
 If your account already has noninteractive sudo access to Docker, invoke Compose
 through `sudo -n env ARTISAN_WORKTREE=... ARTISAN_DOCKER_UID=... ARTISAN_DOCKER_GID=...

@@ -20,6 +20,17 @@ def main() -> None:
     parser.add_argument("provider_checkout", type=Path)
     parser.add_argument("core_revision")
     arguments = parser.parse_args()
+    expected_revision = subprocess.check_output(
+        [
+            "git",
+            "-C",
+            str(arguments.core_checkout),
+            "rev-parse",
+            "--verify",
+            f"{arguments.core_revision}^{{commit}}",
+        ],
+        text=True,
+    ).strip()
     evidence = {}
     for name, module, checkout in (
         ("artisan", artisan, arguments.core_checkout),
@@ -31,7 +42,7 @@ def main() -> None:
             ["git", "-C", str(checkout), "rev-parse", "HEAD"], text=True
         ).strip()
         evidence[name] = {"revision": revision, "import_path": str(source)}
-    assert evidence["artisan"]["revision"] == arguments.core_revision, evidence
+    assert evidence["artisan"]["revision"] == expected_revision, evidence
     sys.stdout.write(json.dumps(evidence, indent=2) + "\n")
 
 

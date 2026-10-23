@@ -13,7 +13,7 @@ concurrency:
 
 env:
   PIXI_LOCKED: "1"
-  ARTISAN_CORE_REF: ea7bf621b4e2e293d3e6c7c1f82099e44fe48bd8
+  ARTISAN_CORE_REF: main
 
 jobs:
   lint:
