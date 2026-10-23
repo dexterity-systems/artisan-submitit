@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import threading
+import time
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -11,6 +12,7 @@ import pytest
 import submitit
 from artisan.orchestration.runner_api import (
     BatchStrategy,
+    CancellationStatus,
     RunnerResources,
     UnitResult,
 )
@@ -362,397 +364,442 @@ class TestSlurmRunner:
             SlurmRunner(**{alias: value})
 
 
-class TestSlurmLifecycleRouter:
-    def test_dispatch_returns_while_scheduler_submission_is_blocked(
-        self, tmp_path
-    ) -> None:
-        entered_batch = threading.Event()
-        release_batch = threading.Event()
-        dispatch_returned = threading.Event()
-        stdout = tmp_path / "stdout"
-        stdout.write_text("completed")
-        job = MagicMock(job_id="99_0")
-        job.done.return_value = True
-        job.result.return_value = [_result(0)]
-        job.paths = SimpleNamespace(stdout=stdout, stderr=tmp_path / "stderr")
-        executor = MagicMock()
+def _observation(state="COMPLETED", *, never_started=False):
+    from datetime import UTC, datetime
 
-        @contextlib.contextmanager
-        def blocking_batch():
-            entered_batch.set()
-            release_batch.wait(timeout=2)
-            yield
+    from artisan_submitit.cancellation import SchedulerObservation
 
-        executor.batch.side_effect = blocking_batch
-        executor.submit.return_value = job
-        router = SlurmLifecycleRouter(executor, units_per_worker=1, max_array_size=1)
+    now = datetime.now(UTC)
+    return SchedulerObservation(
+        state, now, None if never_started else now, now, never_started
+    )
 
-        def dispatch() -> None:
-            router.dispatch(_units(1), MagicMock())
-            dispatch_returned.set()
 
-        caller = threading.Thread(target=dispatch)
-        caller.start()
-        try:
-            assert entered_batch.wait(timeout=1)
-            assert dispatch_returned.wait(timeout=1)
-        finally:
-            release_batch.set()
-            caller.join(timeout=2)
-        assert router._thread is not None
-        router._thread.join(timeout=2)
-        assert len(router.collect()) == 1
+@pytest.fixture
+def transport(tmp_path, monkeypatch):
+    """A transport double publishes the same atomic evidence as a real worker."""
+    import pickle
 
-    def test_chunks_arrays_and_preserves_unit_order(self, tmp_path) -> None:
-        executor = MagicMock()
-        jobs = []
-        for index, batch_results in enumerate(
-            [[_result(0), _result(1)], [_result(2), _result(3)], [_result(4)]]
-        ):
-            job = MagicMock()
-            job.job_id = f"99_{index}"
-            job.done.return_value = True
-            job.result.return_value = batch_results
-            job.paths = SimpleNamespace(
-                stdout=tmp_path / f"out_{index}",
-                stderr=tmp_path / f"err_{index}",
-            )
-            job.paths.stdout.write_text("completed")
-            jobs.append(job)
-        executor.submit.side_effect = jobs
-        router = SlurmLifecycleRouter(
-            executor=executor,
-            units_per_worker=2,
-            max_array_size=2,
-        )
+    from artisan_submitit.worker import WorkerOutcome
 
-        results = router.run(_units(5), MagicMock())
+    executor = MagicMock()
+    jobs = []
+    folders = []
 
-        assert [result.execution_run_ids for result in results] == [
-            ["0"],
-            ["1"],
-            ["2"],
-            ["3"],
-            ["4"],
-        ]
-        assert executor.batch.call_count == 2
-        assert executor.submit.call_count == 3
-        assert router.submitted_job_ids == ("99_0", "99_1", "99_2")
-
-    def test_scheduler_arrays_run_as_sequential_global_concurrency_waves(
-        self, tmp_path
-    ) -> None:
-        first_collection_started = threading.Event()
-        release_first = threading.Event()
-        executor = MagicMock()
-        jobs = []
-        for index in range(3):
-            stdout = tmp_path / f"wave_out_{index}"
-            stdout.write_text("completed")
-            job = MagicMock(job_id=f"44_{index}")
-            job.done.return_value = True
-            job.paths = SimpleNamespace(
-                stdout=stdout,
-                stderr=tmp_path / f"wave_err_{index}",
-            )
-            job.result.return_value = [_result(index)]
-            jobs.append(job)
-
-        def first_result():
-            first_collection_started.set()
-            release_first.wait(timeout=2)
-            return [_result(0)]
-
-        jobs[0].result.side_effect = first_result
-        executor.submit.side_effect = jobs
-        router = SlurmLifecycleRouter(executor, units_per_worker=1, max_array_size=1)
-
-        router.dispatch(_units(3), MagicMock())
-        try:
-            assert first_collection_started.wait(timeout=1)
-            assert executor.submit.call_count == 1
-        finally:
-            release_first.set()
-        assert router._thread is not None
-        router._thread.join(timeout=2)
-
-        results = router.collect()
-        assert [result.execution_run_ids for result in results] == [
-            ["0"],
-            ["1"],
-            ["2"],
-        ]
-        assert executor.batch.call_count == 3
-
-    def test_malformed_batch_becomes_one_failure_per_unit(self, tmp_path) -> None:
-        job = MagicMock()
-        job.job_id = "12_0"
-        job.done.return_value = True
-        job.result.return_value = [_result(0)]
+    def submit(fn, units, runtime_env, folder):
+        index = len(jobs)
+        job = MagicMock(job_id=f"99_{index}")
         job.paths = SimpleNamespace(
-            stdout=tmp_path / "stdout",
-            stderr=tmp_path / "stderr",
+            stdout=tmp_path / f"out_{index}", stderr=tmp_path / f"err_{index}"
         )
         job.paths.stdout.write_text("completed")
-        executor = MagicMock()
-        executor.submit.return_value = job
-        router = SlurmLifecycleRouter(executor, units_per_worker=2, max_array_size=10)
+        job.paths.stderr.write_text("worker warning")
+        results = [
+            _result(int(unit._mock_name.removeprefix("unit_"))) for unit in units
+        ]
+        (folder / "outcome.pkl").write_bytes(pickle.dumps(WorkerOutcome(results, None)))
+        jobs.append(job)
+        folders.append(folder)
+        return job
 
-        results = router.run(_units(2), MagicMock())
+    executor.submit.side_effect = submit
+    monkeypatch.setattr(
+        "artisan_submitit.slurm.query_job_states",
+        lambda ids, **kw: {value: _observation() for value in ids},
+    )
+    cancelled = MagicMock(return_value=None)
+    monkeypatch.setattr("artisan_submitit.slurm.cancel_jobs", cancelled)
+    return SimpleNamespace(
+        executor=executor, jobs=jobs, folders=folders, cancel=cancelled, submit=submit
+    )
 
-        assert len(results) == 2
-        assert all(not result.success for result in results)
-        assert all(result.error for result in results)
 
-    def test_job_exception_becomes_ordered_failure_results(self, tmp_path) -> None:
-        job = MagicMock()
-        job.job_id = "12_0"
-        job.done.return_value = True
-        job.result.side_effect = RuntimeError("node failed")
-        job.paths = SimpleNamespace(
-            stdout=tmp_path / "stdout",
-            stderr=tmp_path / "stderr",
+def _router(transport, tmp_path, *, units_per_worker=1, max_array_size=1):
+    return SlurmLifecycleRouter(
+        transport.executor, units_per_worker, max_array_size, tmp_path / "control"
+    )
+
+
+class TestSlurmLifecycleRouter:
+    def test_dispatch_returns_while_scheduler_submission_is_blocked(
+        self, tmp_path, transport
+    ) -> None:
+        entered, release = threading.Event(), threading.Event()
+
+        @contextlib.contextmanager
+        def blocked():
+            entered.set()
+            assert release.wait(2)
+            yield
+
+        transport.executor.batch.side_effect = blocked
+        router = _router(transport, tmp_path)
+        router.dispatch(_units(1), MagicMock())
+        try:
+            assert entered.wait(1)
+            assert not router.is_done()
+        finally:
+            release.set()
+        router._thread.join(3)
+        assert len(router.collect()) == 1
+
+    def test_chunks_arrays_and_preserves_unit_order(self, tmp_path, transport) -> None:
+        router = _router(transport, tmp_path, units_per_worker=2, max_array_size=2)
+        results = router.run(_units(5), MagicMock())
+        assert [r.execution_run_ids for r in results] == [[str(i)] for i in range(5)]
+        assert transport.executor.batch.call_count == 2
+        assert router.submitted_job_ids == ("99_0", "99_1", "99_2")
+        for job in transport.jobs:
+            job.done.assert_not_called()
+            job.result.assert_not_called()
+            job.cancel.assert_not_called()
+
+    def test_scheduler_arrays_run_as_sequential_global_concurrency_waves(
+        self, tmp_path, transport, monkeypatch
+    ) -> None:
+        from artisan_submitit.worker import read_worker_outcome
+
+        entered, release = threading.Event(), threading.Event()
+
+        def read(folder):
+            if folder == transport.folders[0]:
+                entered.set()
+                assert release.wait(2)
+            return read_worker_outcome(folder)
+
+        monkeypatch.setattr("artisan_submitit.slurm.read_worker_outcome", read)
+        router = _router(transport, tmp_path)
+        router.dispatch(_units(3), MagicMock())
+        try:
+            assert entered.wait(1)
+            assert transport.executor.submit.call_count == 1
+        finally:
+            release.set()
+        router._thread.join(3)
+        assert [r.execution_run_ids for r in router.collect()] == [
+            [str(i)] for i in range(3)
+        ]
+        assert transport.executor.batch.call_count == 3
+
+    def test_malformed_batch_becomes_one_failure_per_unit(
+        self, tmp_path, transport, monkeypatch
+    ) -> None:
+        from artisan_submitit.worker import WorkerOutcome
+
+        monkeypatch.setattr(
+            "artisan_submitit.slurm.read_worker_outcome",
+            lambda folder: WorkerOutcome([_result(0)], None),
         )
-        job.paths.stdout.write_text("failed")
-        executor = MagicMock()
-        executor.submit.return_value = job
-        router = SlurmLifecycleRouter(executor, units_per_worker=2, max_array_size=10)
-
+        router = _router(transport, tmp_path, units_per_worker=2)
         results = router.run(_units(2), MagicMock())
-
         assert len(results) == 2
-        assert all(not result.success for result in results)
-        assert all("node failed" in result.error for result in results)
+        assert all(not r.success and r.error for r in results)
+        assert router.cancellation_acknowledgement.status == CancellationStatus.UNKNOWN
+
+    def test_job_failure_without_worker_proof_is_unknown(
+        self, tmp_path, transport, monkeypatch
+    ) -> None:
+        monkeypatch.setattr(
+            "artisan_submitit.slurm.read_worker_outcome", lambda folder: None
+        )
+        monkeypatch.setattr(
+            "artisan_submitit.slurm.query_job_states",
+            lambda ids, **kw: {i: _observation("NODE_FAIL") for i in ids},
+        )
+        router = _router(transport, tmp_path, units_per_worker=2)
+        results = router.run(_units(2), MagicMock())
+        assert len(results) == 2
+        assert all(not r.success and "NODE_FAIL" in r.error for r in results)
+        assert router.cancellation_acknowledgement.status == CancellationStatus.UNKNOWN
 
     def test_later_wave_submission_failure_preserves_ordered_cardinality(
-        self, tmp_path
+        self, tmp_path, transport
     ) -> None:
-        first_job = MagicMock(job_id="21_0")
-        first_job.done.return_value = True
-        first_job.result.return_value = [_result(0)]
-        first_job.paths = SimpleNamespace(
-            stdout=tmp_path / "first_stdout",
-            stderr=tmp_path / "first_stderr",
-        )
-        first_job.paths.stdout.write_text("completed")
-        executor = MagicMock()
-        executor.submit.side_effect = [first_job, RuntimeError("submit failed")]
-        router = SlurmLifecycleRouter(executor, units_per_worker=1, max_array_size=1)
+        def submit(*args):
+            if transport.jobs:
+                raise RuntimeError("submit failed")
+            return transport.submit(*args)
 
+        transport.executor.submit.side_effect = submit
+        router = _router(transport, tmp_path)
         results = router.run(_units(3), MagicMock())
-
         assert len(results) == 3
-        assert results[0].success is True
-        assert all(not result.success for result in results[1:])
-        assert all("submit failed" in result.error for result in results[1:])
-        first_job.cancel.assert_not_called()
+        assert results[0].success
+        assert all(not r.success and "submit failed" in r.error for r in results[1:])
 
     def test_batch_context_failure_never_publishes_delayed_jobs(self, tmp_path) -> None:
         executor = submitit.LocalExecutor(folder=tmp_path / "submitit")
-        router = SlurmLifecycleRouter(executor, units_per_worker=1, max_array_size=2)
-
+        router = SlurmLifecycleRouter(executor, 1, 2, tmp_path / "control")
         with patch.object(
             executor,
             "_internal_process_submissions",
             side_effect=RuntimeError("scheduler submit failed"),
         ):
             results = router.run(_units(3), MagicMock())
-
         assert router.submitted_job_ids == ()
         assert len(results) == 3
-        assert all(not result.success for result in results)
-        assert all("scheduler submit failed" in result.error for result in results)
-
-    def test_cancel_does_not_touch_job_until_batch_promotion_finishes(
-        self, tmp_path
-    ) -> None:
-        promotion_started = threading.Event()
-        finish_promotion = threading.Event()
-        stdout = tmp_path / "promotion_stdout"
-        stdout.write_text("completed")
-        job = MagicMock(job_id="54_0")
-        job.done.return_value = False
-        job.result.return_value = [_result(0)]
-        job.paths = SimpleNamespace(
-            stdout=stdout,
-            stderr=tmp_path / "promotion_stderr",
+        assert all(
+            not r.success and "scheduler submit failed" in r.error for r in results
         )
-        executor = MagicMock()
+        assert router.cancellation_acknowledgement.status == CancellationStatus.UNKNOWN
+        assert all(
+            folder.joinpath("cancel").exists()
+            for folder in (tmp_path / "control").iterdir()
+        )
+
+    def test_cancel_during_promotion_remains_requested_until_collection(
+        self, tmp_path, transport, monkeypatch
+    ) -> None:
+        entered, release = threading.Event(), threading.Event()
 
         @contextlib.contextmanager
-        def delayed_promotion():
+        def blocked_promotion():
             yield
-            promotion_started.set()
-            finish_promotion.wait(timeout=2)
+            entered.set()
+            assert release.wait(2)
 
-        executor.batch.side_effect = delayed_promotion
-        executor.submit.return_value = job
-        router = SlurmLifecycleRouter(executor, units_per_worker=1, max_array_size=1)
-
-        router.dispatch(_units(1), MagicMock())
-        try:
-            assert promotion_started.wait(timeout=1)
-            router.cancel()
-            job.cancel.assert_not_called()
-        finally:
-            finish_promotion.set()
-        assert router._thread is not None
-        router._thread.join(timeout=2)
-
-        router.collect()
-        job.cancel.assert_called_once_with(check=True)
-
-    def test_cancellation_synthesizes_failures_for_unsubmitted_waves(
-        self, tmp_path
-    ) -> None:
-        collection_started = threading.Event()
-        release_collection = threading.Event()
-        stdout = tmp_path / "cancel_stdout"
-        stdout.write_text("cancelled")
-        job = MagicMock(job_id="55_0")
-        job.paths = SimpleNamespace(stdout=stdout, stderr=tmp_path / "cancel_stderr")
-
-        def pending_result() -> bool:
-            collection_started.set()
-            release_collection.wait(timeout=2)
-            return False
-
-        job.done.side_effect = pending_result
-        executor = MagicMock()
-        executor.submit.return_value = job
-        router = SlurmLifecycleRouter(executor, units_per_worker=1, max_array_size=1)
-
+        transport.executor.batch.side_effect = blocked_promotion
+        monkeypatch.setattr(
+            "artisan_submitit.slurm.read_worker_outcome", lambda folder: None
+        )
+        monkeypatch.setattr(
+            "artisan_submitit.slurm.query_job_states",
+            lambda ids, **kw: {
+                i: _observation("CANCELLED", never_started=True) for i in ids
+            },
+        )
+        router = _router(transport, tmp_path)
         router.dispatch(_units(3), MagicMock())
-        assert collection_started.wait(timeout=1)
-        router.cancel()
-        release_collection.set()
-        assert router._thread is not None
-        router._thread.join(timeout=2)
-
+        try:
+            assert entered.wait(1)
+            assert router.cancel().status == CancellationStatus.REQUESTED
+            transport.cancel.assert_not_called()
+        finally:
+            release.set()
+        router._thread.join(3)
         results = router.collect()
-        assert executor.submit.call_count == 1
         assert len(results) == 3
-        assert all(not result.success for result in results)
-        assert "SLURM job cancelled" in results[0].error
-        assert all("before submission" in result.error for result in results[1:])
-        job.cancel.assert_called_once_with(check=True)
-        job.result.assert_not_called()
-        assert router._thread is not None
+        assert all(not r.success for r in results)
+        assert transport.executor.submit.call_count == 1
+        assert (transport.folders[0] / "cancel").exists()
+        assert router.cancel().status == CancellationStatus.CONFIRMED
         assert not router._thread.is_alive()
 
-    def test_dispatch_precondition_failure_completes_with_failures(self) -> None:
-        router = SlurmLifecycleRouter(
-            MagicMock(),
-            units_per_worker=0,
-            max_array_size=10,
+    def test_promotion_failure_keeps_admission_uncertainty_and_exact_cleanup(
+        self, tmp_path, transport
+    ) -> None:
+        entered, release = threading.Event(), threading.Event()
+
+        @contextlib.contextmanager
+        def failed_promotion():
+            yield
+            entered.set()
+            assert release.wait(2)
+            raise RuntimeError("partial promotion failed")
+
+        transport.executor.batch.side_effect = failed_promotion
+        router = _router(transport, tmp_path)
+        router.dispatch(_units(3), MagicMock())
+        try:
+            assert entered.wait(1)
+            assert router.cancel().status == CancellationStatus.REQUESTED
+        finally:
+            release.set()
+        router._thread.join(3)
+        assert len(router.collect()) == 3
+        assert router.cancel().status == CancellationStatus.UNKNOWN
+        assert router.submitted_job_ids == ("99_0",)
+        assert (transport.folders[0] / "cancel").exists()
+        transport.cancel.assert_called_once_with(["99_0"])
+
+    def test_invalid_outcome_overrides_queued_non_start_proof(
+        self, tmp_path, transport, monkeypatch
+    ) -> None:
+        entered, release = threading.Event(), threading.Event()
+
+        def invalid_outcome(folder):
+            entered.set()
+            assert release.wait(2)
+            raise ValueError("malformed final evidence")
+
+        monkeypatch.setattr(
+            "artisan_submitit.slurm.read_worker_outcome", invalid_outcome
         )
+        monkeypatch.setattr(
+            "artisan_submitit.slurm.query_job_states",
+            lambda ids, **kw: {
+                i: _observation("CANCELLED", never_started=True) for i in ids
+            },
+        )
+        router = _router(transport, tmp_path)
+        router.dispatch(_units(1), MagicMock())
+        try:
+            assert entered.wait(1)
+            router.cancel()
+        finally:
+            release.set()
+        router._thread.join(3)
+        assert router.cancel().status == CancellationStatus.UNKNOWN
+        assert "malformed final evidence" in router.collect()[0].error
 
+    def test_query_and_cancel_share_remaining_deadline(
+        self, tmp_path, transport, monkeypatch
+    ) -> None:
+        from datetime import UTC, datetime
+
+        from artisan_submitit.slurm import _SubmittedBatch
+
+        now = [100.0]
+        monkeypatch.setattr(
+            "artisan_submitit.cancellation.time.monotonic", lambda: now[0]
+        )
+        monkeypatch.setattr("artisan_submitit.cancellation.COOPERATION_TIMEOUT", 0)
+        router = _router(transport, tmp_path)
+        router._cancellation.request()
+        now[0] += 24.2
+
+        def query(ids, **kwargs):
+            now[0] += 0.5
+            return {}
+
+        monkeypatch.setattr("artisan_submitit.slurm.query_job_states", query)
+        item = _SubmittedBatch(
+            MagicMock(job_id="99_0"), _units(1), tmp_path, datetime.now(UTC)
+        )
+        router._observe_jobs([item])
+        assert transport.cancel.call_args.kwargs["timeout"] == pytest.approx(0.3)
+
+    def test_cancel_does_not_join_stalled_log_collection(
+        self, tmp_path, transport, monkeypatch
+    ) -> None:
+        entered, release = threading.Event(), threading.Event()
+
+        def logs(*args):
+            entered.set()
+            assert release.wait(2)
+
+        monkeypatch.setattr("artisan_submitit.slurm._read_submitit_job_log", logs)
+        router = _router(transport, tmp_path)
+        router.dispatch(_units(1), MagicMock())
+        try:
+            assert entered.wait(1)
+            assert router.cancel().status == CancellationStatus.REQUESTED
+            assert not router.is_done()
+        finally:
+            release.set()
+        router._thread.join(3)
+        assert router.cancel().status == CancellationStatus.REJECTED
+        assert router.collect()[0].success
+
+    def test_cancel_uses_exact_ids_and_retries_failed_requests(
+        self, tmp_path, transport, monkeypatch
+    ) -> None:
+        monkeypatch.setattr("artisan_submitit.cancellation.COOPERATION_TIMEOUT", 0)
+        monkeypatch.setattr(
+            "artisan_submitit.slurm.read_worker_outcome", lambda folder: None
+        )
+        transport.cancel.side_effect = ["request failed", None]
+
+        def states(ids, **kwargs):
+            if transport.cancel.call_count >= 2:
+                return {i: _observation("CANCELLED", never_started=True) for i in ids}
+            return {}
+
+        monkeypatch.setattr("artisan_submitit.slurm.query_job_states", states)
+        router = _router(transport, tmp_path, max_array_size=2)
+        router.dispatch(_units(2), MagicMock())
+        deadline = time.monotonic() + 2
+        while len(transport.jobs) != 2 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert len(transport.jobs) == 2
+        assert router.cancel().status == CancellationStatus.REQUESTED
+        router._thread.join(5)
+        assert len(router.collect()) == 2
+        assert router.cancel().status == CancellationStatus.CONFIRMED
+        assert transport.cancel.call_args_list[0].args == (["99_0", "99_1"],)
+        assert transport.cancel.call_count == 2
+        assert all((folder / "cancel").exists() for folder in transport.folders)
+
+    @pytest.mark.parametrize("state", ["RUNNING", "COMPLETING", None])
+    def test_accepted_request_or_missing_accounting_never_confirms(
+        self, tmp_path, transport, monkeypatch, state
+    ) -> None:
+        monkeypatch.setattr("artisan_submitit.cancellation.CANCELLATION_TIMEOUT", 0.15)
+        monkeypatch.setattr("artisan_submitit.cancellation.COOPERATION_TIMEOUT", 0)
+        monkeypatch.setattr(
+            "artisan_submitit.slurm.read_worker_outcome", lambda folder: None
+        )
+        monkeypatch.setattr(
+            "artisan_submitit.slurm.query_job_states",
+            lambda ids, **kw: {}
+            if state is None
+            else {i: _observation(state) for i in ids},
+        )
+        router = _router(transport, tmp_path)
+        router.dispatch(_units(1), MagicMock())
+        router.cancel()
+        router._thread.join(2)
+        assert router.cancel().status == CancellationStatus.UNKNOWN
+        assert all(not r.success for r in router.collect())
+
+    def test_late_promotion_after_deadline_still_cancels_exact_job(
+        self, tmp_path, transport, monkeypatch
+    ) -> None:
+        monkeypatch.setattr("artisan_submitit.cancellation.CANCELLATION_TIMEOUT", 0.1)
+        entered, release = threading.Event(), threading.Event()
+
+        @contextlib.contextmanager
+        def blocked_promotion():
+            yield
+            entered.set()
+            assert release.wait(2)
+
+        transport.executor.batch.side_effect = blocked_promotion
+        router = _router(transport, tmp_path)
+        router.dispatch(_units(1), MagicMock())
+        try:
+            assert entered.wait(1)
+            router.cancel()
+            time.sleep(0.12)
+            assert router.cancel().status == CancellationStatus.UNKNOWN
+            assert not router.is_done()
+        finally:
+            release.set()
+        router._thread.join(2)
+        transport.cancel.assert_called_once_with(["99_0"])
+        assert router.cancel().status == CancellationStatus.UNKNOWN
+        assert len(router.collect()) == 1
+
+    def test_dispatch_precondition_failure_completes_with_failures(
+        self, tmp_path, transport
+    ) -> None:
+        router = _router(transport, tmp_path, units_per_worker=0)
         results = router.run(_units(2), MagicMock())
-
         assert router.is_done()
         assert len(results) == 2
-        assert all(not result.success for result in results)
+        assert all(not r.success for r in results)
 
-    def test_logs_are_attached_to_every_result_in_job(self, tmp_path) -> None:
-        stdout = tmp_path / "stdout"
-        stderr = tmp_path / "stderr"
-        stdout.write_text("worker output")
-        stderr.write_text("worker warning")
-        job = MagicMock()
-        job.job_id = "12_0"
-        job.done.return_value = True
-        job.result.return_value = [_result(0), _result(1)]
-        job.paths = SimpleNamespace(stdout=stdout, stderr=stderr)
-        executor = MagicMock()
-        executor.submit.return_value = job
-        router = SlurmLifecycleRouter(executor, units_per_worker=2, max_array_size=10)
-
-        results = router.run(_units(2), MagicMock())
-
-        assert all(result.worker_log is not None for result in results)
-        assert all("worker warning" in result.worker_log for result in results)
-
-    def test_cancel_uses_exact_submitit_handles(self, tmp_path) -> None:
-        executor = MagicMock()
-        jobs = []
-        for index in range(2):
-            job = MagicMock()
-            job.job_id = f"123_{index}"
-            job.result.return_value = [_result(index)]
-            job.paths = SimpleNamespace(
-                stdout=tmp_path / f"out_{index}",
-                stderr=tmp_path / f"err_{index}",
-            )
-            job.paths.stdout.write_text("completed")
-            jobs.append(job)
-        executor.submit.side_effect = jobs
-        router = SlurmLifecycleRouter(executor, units_per_worker=1, max_array_size=10)
-        router._dispatch_started = True
-        router._submit_array([_units(1), _units(1)], MagicMock())
-
-        router.cancel()
-        router.cancel()
-
-        for job in jobs:
-            job.cancel.assert_called_once_with(check=True)
-
-    def test_failed_cancellation_is_retried(self) -> None:
-        job = MagicMock(job_id="123_0")
-        job.done.return_value = False
-        job.cancel.side_effect = [RuntimeError("scancel failed"), None]
-        executor = MagicMock()
-        executor.submit.return_value = job
-        router = SlurmLifecycleRouter(executor, units_per_worker=1, max_array_size=1)
-        router._dispatch_started = True
-        router._submit_array([_units(1)], MagicMock())
-
-        router.cancel()
-        router.cancel()
-
-        assert job.cancel.call_count == 2
-        assert job.cancel.call_args_list[0].kwargs == {"check": True}
-
-    def test_terminal_job_is_not_cancelled(self) -> None:
-        job = MagicMock(job_id="123_0")
-        job.done.return_value = True
-        executor = MagicMock()
-        executor.submit.return_value = job
-        router = SlurmLifecycleRouter(executor, units_per_worker=1, max_array_size=1)
-        router._dispatch_started = True
-        router._submit_array([_units(1)], MagicMock())
-
-        router.cancel()
-
-        job.cancel.assert_not_called()
-
-    def test_cancel_after_collection_does_not_cancel_completed_jobs(
-        self, tmp_path
+    def test_logs_are_attached_to_every_result_in_job(
+        self, tmp_path, transport
     ) -> None:
-        job = MagicMock(job_id="123_0")
-        job.done.return_value = True
-        job.result.return_value = [_result(0)]
-        job.paths = SimpleNamespace(
-            stdout=tmp_path / "stdout",
-            stderr=tmp_path / "stderr",
+        results = _router(transport, tmp_path, units_per_worker=2).run(
+            _units(2), MagicMock()
         )
-        job.paths.stdout.write_text("completed")
-        executor = MagicMock()
-        executor.submit.return_value = job
-        router = SlurmLifecycleRouter(executor, units_per_worker=1, max_array_size=10)
+        assert all("worker warning" in r.worker_log for r in results)
 
-        router.run(_units(1), MagicMock())
-        router.cancel()
+    def test_cancel_after_collection_rejects_and_preserves_results(
+        self, tmp_path, transport
+    ) -> None:
+        router = _router(transport, tmp_path)
+        results = router.run(_units(1), MagicMock())
+        assert router.cancel().status == CancellationStatus.REJECTED
+        assert results[0].success
+        transport.cancel.assert_not_called()
 
-        job.cancel.assert_not_called()
-
-    def test_idle_cancel_does_not_poison_later_dispatch(self) -> None:
-        job = MagicMock(job_id="123_0")
-        executor = MagicMock()
-        executor.submit.return_value = job
-        router = SlurmLifecycleRouter(executor, units_per_worker=1, max_array_size=10)
-        router.cancel()
-
-        router._submit_array([_units(1)], MagicMock())
-
-        job.cancel.assert_not_called()
-        assert not router._cancelled.is_set()
+    def test_idle_cancel_does_not_poison_later_dispatch(
+        self, tmp_path, transport
+    ) -> None:
+        router = _router(transport, tmp_path)
+        assert router.cancel().status == CancellationStatus.REJECTED
+        assert router.run(_units(1), MagicMock())[0].success
+        assert not router._cancellation.event.is_set()

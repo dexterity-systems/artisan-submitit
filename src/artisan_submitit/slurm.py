@@ -9,12 +9,15 @@ import uuid
 from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import submitit
 from artisan.orchestration.runner_api import (
     BatchStrategy,
+    CancellationAcknowledgement,
+    CancellationStatus,
     ExecutionUnit,
     LifecycleRouter,
     OrchestratorTraits,
@@ -23,12 +26,18 @@ from artisan.orchestration.runner_api import (
     RuntimeEnvironment,
     UnitResult,
     WorkerTraits,
-    execute_unit_batch,
     failure_results_for_units,
     pack_units,
     validate_batch_results,
 )
 
+from artisan_submitit.cancellation import (
+    PROVIDER_CONFIRMATION_TIMEOUT,
+    CancellationState,
+    SchedulerObservation,
+    cancel_jobs,
+    query_job_states,
+)
 from artisan_submitit.utils import (
     chunked,
     get_cluster_max_array_size,
@@ -37,6 +46,7 @@ from artisan_submitit.utils import (
     read_job_logs,
     reject_managed_scheduler_arguments,
 )
+from artisan_submitit.worker import WorkerOutcome, read_worker_outcome, run_worker_batch
 
 logger = logging.getLogger(__name__)
 
@@ -86,12 +96,21 @@ _REMOVED_PARAMETER_NAMES = {
 }
 
 
-@dataclass(frozen=True)
+@dataclass
 class _SubmittedBatch:
     """One exact Submitit job handle and the units it owns."""
 
     job: submitit.Job[Any]
     units: list[ExecutionUnit]
+    control_folder: Path
+    submitted_after: datetime
+    outcome: WorkerOutcome | None = None
+    observation: SchedulerObservation | None = None
+    results: list[UnitResult] | None = None
+    terminal_since: float | None = None
+    request_written: bool = False
+    error: str | None = None
+    outcome_error: str | None = None
 
 
 class SlurmLifecycleRouter(LifecycleRouter):
@@ -102,18 +121,20 @@ class SlurmLifecycleRouter(LifecycleRouter):
         executor: submitit.AutoExecutor,
         units_per_worker: int,
         max_array_size: int,
+        control_folder: Path,
     ) -> None:
         super().__init__()
         self._executor = executor
         self._units_per_worker = units_per_worker
         self._max_array_size = max_array_size
+        self._control_folder = control_folder
         self._submitted: list[_SubmittedBatch] = []
-        self._cancelling_handles: set[int] = set()
-        self._cancelled_handles: set[int] = set()
-        self._completed_handles: set[int] = set()
         self._lock = threading.Lock()
-        self._cancelled = threading.Event()
+        self._cancellation = CancellationState()
         self._dispatch_started = False
+        self._owners: list[CancellationAcknowledgement | None] = []
+        self._prevented = False
+        self._closure_error: str | None = None
 
     @property
     def submitted_job_ids(self) -> tuple[str, ...]:
@@ -131,36 +152,23 @@ class SlurmLifecycleRouter(LifecycleRouter):
             self._dispatch_started = True
         self._start_background(lambda: self._run_waves(units, runtime_env))
 
-    def cancel(self) -> None:
-        """Cancel only jobs submitted by this router; safe to call repeatedly."""
+    def cancel(self) -> CancellationAcknowledgement:
+        """Request background cleanup without transport I/O or a live-thread join."""
         with self._lock:
             if not self._dispatch_started:
-                return
-            self._cancelled.set()
-            jobs = [
-                item.job
-                for item in self._submitted
-                if id(item.job) not in self._cancelled_handles
-                and id(item.job) not in self._cancelling_handles
-                and id(item.job) not in self._completed_handles
-            ]
-            self._cancelling_handles.update(id(job) for job in jobs)
-        for job in jobs:
-            handle = id(job)
-            try:
-                if job.done() is True:
-                    with self._lock:
-                        self._completed_handles.add(handle)
-                    continue
-                job.cancel(check=True)
-            except Exception:
-                logger.debug("Failed to cancel an owned SLURM job", exc_info=True)
-            else:
-                with self._lock:
-                    self._cancelled_handles.add(handle)
-            finally:
-                with self._lock:
-                    self._cancelling_handles.discard(handle)
+                return CancellationAcknowledgement(
+                    CancellationStatus.REJECTED, "No SLURM work was dispatched"
+                )
+        evidence = self._cancellation.request()
+        if self.is_done():
+            if self._thread is not None:
+                self._thread.join()
+            return self._cancellation.current()
+        if evidence.status == CancellationStatus.UNKNOWN:
+            return evidence
+        return CancellationAcknowledgement(
+            CancellationStatus.REQUESTED, "Waiting for SLURM ownership closure"
+        )
 
     def _run_waves(
         self,
@@ -168,15 +176,36 @@ class SlurmLifecycleRouter(LifecycleRouter):
         runtime_env: RuntimeEnvironment,
     ) -> list[UnitResult]:
         """Submit and collect one scheduler-sized wave at a time."""
+        results: list[UnitResult] = []
         try:
-            batches = pack_units(units, self._units_per_worker)
-            waves = chunked(batches, self._max_array_size)
+            results = self._execute_waves(units, runtime_env)
         except Exception as exc:
-            return failure_results_for_units(units, exc)
+            results = failure_results_for_units(units, exc)
+            if self._submitted:
+                self._closure_error = f"SLURM collection failed: {exc}"
+        finally:
+            evidence = self._cancellation.finish(
+                self._owners, results, self._prevented, self._closure_error
+            )
+            if (
+                self._cancellation.event.is_set()
+                or evidence.status == CancellationStatus.UNKNOWN
+            ):
+                self._cancellation_acknowledgement = evidence
+        return results
 
+    def _execute_waves(
+        self,
+        units: list[ExecutionUnit],
+        runtime_env: RuntimeEnvironment,
+    ) -> list[UnitResult]:
+        """Retain global array concurrency and aligned results for skipped waves."""
+        batches = pack_units(units, self._units_per_worker)
+        waves = chunked(batches, self._max_array_size)
         results: list[UnitResult] = []
         for index, wave in enumerate(waves):
-            if self._cancelled.is_set():
+            if self._cancellation.event.is_set():
+                self._prevented = True
                 results.extend(
                     _failure_results_for_waves(
                         waves[index:], "SLURM dispatch cancelled before submission"
@@ -189,6 +218,15 @@ class SlurmLifecycleRouter(LifecycleRouter):
                 results.extend(_failure_results_for_waves(waves[index:], exc))
                 break
             results.extend(self._collect_submitted(submitted))
+            submitted_count = sum(len(item.units) for item in submitted)
+            skipped = [unit for batch in wave for unit in batch][submitted_count:]
+            if skipped:
+                self._prevented = True
+                results.extend(
+                    failure_results_for_units(
+                        skipped, "SLURM dispatch cancelled before submission"
+                    )
+                )
         return results
 
     def _submit_array(
@@ -198,54 +236,154 @@ class SlurmLifecycleRouter(LifecycleRouter):
     ) -> list[_SubmittedBatch]:
         """Submit one scheduler-sized array and retain every exact handle."""
         pending: list[_SubmittedBatch] = []
-        with self._executor.batch():
-            for batch in batches:
-                job = self._executor.submit(execute_unit_batch, batch, runtime_env)
-                pending.append(_SubmittedBatch(job=job, units=batch))
+        submitted_after = datetime.now(UTC).replace(microsecond=0)
+        try:
+            with self._executor.batch():
+                for batch in batches:
+                    if self._cancellation.event.is_set():
+                        break
+                    control_folder = self._control_folder / uuid.uuid4().hex
+                    control_folder.mkdir(parents=True)
+                    job = self._executor.submit(
+                        run_worker_batch, batch, runtime_env, control_folder
+                    )
+                    pending.append(
+                        _SubmittedBatch(job, batch, control_folder, submitted_after)
+                    )
+        except Exception as exc:
+            self._closure_error = f"SLURM submission ownership is unresolved: {exc}"
+            self._publish_requests(pending)
+            # Default batch contexts forbid implicit submission on attribute reads.
+            promoted = [item for item in pending if hasattr(item.job, "job_id")]
+            with self._lock:
+                self._submitted.extend(promoted)
+            if promoted:
+                cancel_jobs([str(item.job.job_id) for item in promoted])
+            raise
         with self._lock:
             self._submitted.extend(pending)
-        if self._cancelled.is_set():
-            self.cancel()
+        if self._cancellation.event.is_set():
+            self._publish_requests(pending)
+            # Promotion may return after the caller already received UNKNOWN.
+            if self._cancellation.expired:
+                cancel_jobs([str(item.job.job_id) for item in pending])
         return pending
 
     def _collect_submitted(
         self,
         submitted: list[_SubmittedBatch],
     ) -> list[UnitResult]:
-        """Collect batches in submission order and attach their exact job logs."""
+        """Progress every owner together, then assemble results in input order."""
         if not submitted:
             return []
-        collected: list[list[UnitResult]] = []
-        for item in submitted:
-            batch_results = self._collect_job(item)
-            with self._lock:
-                self._completed_handles.add(id(item.job))
-            collected.append(batch_results)
-
+        next_query = 0.0
+        while any(item.results is None for item in submitted):
+            pending = [item for item in submitted if item.results is None]
+            if self._cancellation.event.is_set():
+                self._publish_requests(pending)
+            if self._cancellation.expired:
+                for item in pending:
+                    self._fail_unresolved(
+                        item, "SLURM cancellation closure is unresolved"
+                    )
+                break
+            if time.monotonic() >= next_query:
+                self._observe_jobs(pending)
+                next_query = time.monotonic() + 1.0
+            for item in pending:
+                self._read_outcome(item)
+                self._settle_job(item)
+            time.sleep(0.05)
         with ThreadPoolExecutor(max_workers=min(32, len(submitted))) as pool:
-            logs = pool.map(lambda item: _read_submitit_job_log(item.job), submitted)
+            retries = 1 if self._cancellation.event.is_set() else 5
+            logs = pool.map(
+                lambda item: _read_submitit_job_log(item.job, retries), submitted
+            )
             return [
                 result
-                for batch_results, worker_log in zip(collected, logs, strict=True)
-                for result in _attach_worker_log(batch_results, worker_log)
+                for item, worker_log in zip(submitted, logs, strict=True)
+                for result in _attach_worker_log(item.results or [], worker_log)
             ]
 
-    def _collect_job(self, item: _SubmittedBatch) -> list[UnitResult]:
-        """Wait for one job without trapping collection inside Submitit's cache."""
-        handle = id(item.job)
+    def _publish_requests(self, submitted: list[_SubmittedBatch]) -> None:
+        """Notify all admitted batches before waiting on any one outcome."""
+        for item in submitted:
+            if not item.request_written:
+                try:
+                    (item.control_folder / "cancel").touch(exist_ok=True)
+                    item.request_written = True
+                except OSError as exc:
+                    item.error = f"Cannot publish worker cancellation: {exc}"
+
+    def _observe_jobs(self, pending: list[_SubmittedBatch]) -> None:
+        """Poll accounting and retry exact cancellation within one shared budget."""
+        timeout = max(0.001, min(1.0, self._cancellation.remaining))
+        states = query_job_states(
+            [str(item.job.job_id) for item in pending],
+            submitted_after=min(item.submitted_after for item in pending),
+            timeout=timeout,
+        )
+        for item in pending:
+            item.observation = states.get(str(item.job.job_id))
+        if self._cancellation.event.is_set() and not self._cancellation.cooperating:
+            ids = [
+                str(item.job.job_id)
+                for item in pending
+                if item.observation is None or not item.observation.terminal
+            ]
+            timeout = max(0.001, min(1.0, self._cancellation.remaining))
+            error = cancel_jobs(ids, timeout=timeout) if ids else None
+            if error:
+                for item in pending:
+                    item.error = error
+
+    def _read_outcome(self, item: _SubmittedBatch) -> None:
+        """Read only the provider's atomic protocol, never Submitit's watcher."""
+        if item.outcome is not None or item.outcome_error is not None:
+            return
         try:
-            while item.job.done() is not True:
-                with self._lock:
-                    cancelled = handle in self._cancelled_handles
-                if cancelled:
-                    return failure_results_for_units(item.units, "SLURM job cancelled")
-                if self._cancelled.is_set():
-                    time.sleep(0.1)
-                else:
-                    self._cancelled.wait(timeout=1.0)
-            return validate_batch_results(item.units, item.job.result())
-        except Exception as exc:
-            return failure_results_for_units(item.units, exc)
+            item.outcome = read_worker_outcome(item.control_folder)
+        except (OSError, ValueError) as exc:
+            item.outcome_error = f"Invalid worker outcome: {exc}"
+
+    def _settle_job(self, item: _SubmittedBatch) -> None:
+        """Require transport closure as well as native or queued non-start proof."""
+        state = item.observation
+        if state is None or not state.terminal:
+            return
+        if item.outcome_error is not None:
+            self._fail_unresolved(item, item.outcome_error)
+            return
+        if item.outcome is not None:
+            if len(item.outcome.results) != len(item.units):
+                self._fail_unresolved(item, "Invalid worker batch result cardinality")
+                return
+            item.results = validate_batch_results(item.units, item.outcome.results)
+            self._owners.append(item.outcome.cancellation_acknowledgement)
+            return
+        if self._cancellation.event.is_set() and state.never_started:
+            self._prevented = True
+            item.results = failure_results_for_units(
+                item.units, "SLURM job cancelled before worker startup"
+            )
+            return
+        if item.terminal_since is None:
+            item.terminal_since = time.monotonic()
+        if time.monotonic() - item.terminal_since >= 1.0:
+            self._fail_unresolved(
+                item,
+                item.error
+                or f"SLURM job {item.job.job_id} ended as {state.state} without worker ownership evidence",
+            )
+
+    def _fail_unresolved(self, item: _SubmittedBatch, error: str) -> None:
+        """Keep missing worker proof visible to both core and direct callers."""
+        acknowledgement = CancellationAcknowledgement(CancellationStatus.UNKNOWN, error)
+        self._owners.append(acknowledgement)
+        item.results = [
+            replace(result, cancellation_acknowledgement=acknowledgement)
+            for result in failure_results_for_units(item.units, error)
+        ]
 
 
 class SlurmRunner(RunnerBase):
@@ -264,6 +402,7 @@ class SlurmRunner(RunnerBase):
     orchestrator_traits = OrchestratorTraits(
         shared_filesystem=True,
         staging_verification_timeout=60.0,
+        cancellation_confirmation_timeout=PROVIDER_CONFIRMATION_TIMEOUT,
     )
 
     def __init__(
@@ -308,6 +447,7 @@ class SlurmRunner(RunnerBase):
             executor=executor,
             units_per_worker=batch_strategy.units_per_worker,
             max_array_size=self._get_max_array_size(),
+            control_folder=folder.parent / "control",
         )
 
     def _executor_parameters(
@@ -504,10 +644,12 @@ def _failure_results_for_waves(
     return failure_results_for_units(units, error)
 
 
-def _read_submitit_job_log(job: submitit.Job[Any]) -> str | None:
+def _read_submitit_job_log(job: submitit.Job[Any], retries: int = 5) -> str | None:
     """Read logs from paths belonging to the exact Submitit handle."""
     try:
-        return read_job_logs(Path(job.paths.stdout), Path(job.paths.stderr))
+        return read_job_logs(
+            Path(job.paths.stdout), Path(job.paths.stderr), retries=retries
+        )
     except Exception:
         logger.debug("Failed to read logs for SLURM job %s", job.job_id, exc_info=True)
         return None
