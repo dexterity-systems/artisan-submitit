@@ -83,6 +83,11 @@ never started. `CANCELLED` alone is insufficient. Missing or ambiguous evidence
 produces `UNKNOWN`, even if `scancel` succeeded. Nested compute cancellation
 uncertainty is preserved.
 
+Some clusters assign a start timestamp to jobs cancelled while held, or retain
+only an aggregate accounting row for an unstarted array. Those records cannot
+prove exact-task non-start, so this fallback returns `UNKNOWN`. Running workers
+can still confirm cancellation through their native ownership outcome.
+
 Cancellation closes future array admission, gives native owners up to 10 seconds
 to cooperate, and retries cancellation of exact owned jobs within a shared
 25-second budget. Artisan allows 30 seconds for confirmation. A stuck submission

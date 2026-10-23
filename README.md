@@ -46,8 +46,8 @@ its built-in local runner.
 - Submitit 1.5 or newer;
 - a shared filesystem visible at the same paths from the pipeline manager and
   workers; and
-- SLURM command access (`sbatch` for `SlurmRunner`, an active allocation for
-  `SlurmIntraRunner`).
+- SLURM command access (`sbatch` and working `sacct` accounting for `SlurmRunner`,
+  an active allocation for `SlurmIntraRunner`).
 
 ## Configuration
 

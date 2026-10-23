@@ -93,7 +93,7 @@ def _query(monkeypatch: pytest.MonkeyPatch, rows: str) -> MagicMock:
     return run
 
 
-def test_accounting_uses_exact_array_elements_expanded_and_bounded(monkeypatch) -> None:
+def test_accounting_uses_exact_array_elements_and_bounded_query(monkeypatch) -> None:
     run = _query(
         monkeypatch,
         "123_4|CANCELLED by 1001|2026-10-23T10:00:00|Unknown|2026-10-23T10:01:00|\n123_4.batch|COMPLETED|2026-10-23T10:00:00|Unknown|2026-10-23T10:01:00|\n",
@@ -105,7 +105,7 @@ def test_accounting_uses_exact_array_elements_expanded_and_bounded(monkeypatch) 
     assert states["123_4"].terminal
     assert states["123_4"].never_started
     command = run.call_args.args[0]
-    assert "--array" in command
+    assert "--array" not in command
     assert command[command.index("--jobs") + 1] == "123_4"
     assert run.call_args.kwargs["timeout"] == 0.4
     assert run.call_args.kwargs["env"]["TZ"] == "UTC"

@@ -189,7 +189,6 @@ def query_job_states(
         "sacct",
         "--noheader",
         "--parsable2",
-        "--array",
         "--jobs",
         ",".join(job_ids),
         "--format",

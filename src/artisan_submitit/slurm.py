@@ -380,9 +380,25 @@ class SlurmLifecycleRouter(LifecycleRouter):
         """Keep missing worker proof visible to both core and direct callers."""
         acknowledgement = CancellationAcknowledgement(CancellationStatus.UNKNOWN, error)
         self._owners.append(acknowledgement)
+        results = (
+            item.outcome.results
+            if item.outcome is not None and len(item.outcome.results) == len(item.units)
+            else failure_results_for_units(item.units, error)
+        )
         item.results = [
-            replace(result, cancellation_acknowledgement=acknowledgement)
-            for result in failure_results_for_units(item.units, error)
+            replace(
+                result,
+                success=False,
+                error=result.error or error,
+                cancellation_acknowledgement=(
+                    result.cancellation_acknowledgement
+                    if result.cancellation_acknowledgement is not None
+                    and result.cancellation_acknowledgement.status
+                    == CancellationStatus.UNKNOWN
+                    else acknowledgement
+                ),
+            )
+            for result in results
         ]
 
 

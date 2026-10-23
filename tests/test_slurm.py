@@ -5,6 +5,8 @@ from __future__ import annotations
 import contextlib
 import threading
 import time
+from dataclasses import replace
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -12,6 +14,7 @@ import pytest
 import submitit
 from artisan.orchestration.runner_api import (
     BatchStrategy,
+    CancellationAcknowledgement,
     CancellationStatus,
     RunnerResources,
     UnitResult,
@@ -741,6 +744,65 @@ class TestSlurmLifecycleRouter:
         router._thread.join(2)
         assert router.cancel().status == CancellationStatus.UNKNOWN
         assert all(not r.success for r in router.collect())
+
+    def test_missing_accounting_preserves_received_results_and_nested_uncertainty(
+        self,
+        tmp_path: Path,
+        transport: SimpleNamespace,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from artisan_submitit.worker import WorkerOutcome
+
+        monkeypatch.setattr("artisan_submitit.cancellation.CANCELLATION_TIMEOUT", 0.15)
+        monkeypatch.setattr(
+            "artisan_submitit.slurm.query_job_states", lambda ids, **kw: {}
+        )
+        monkeypatch.setattr(
+            "artisan_submitit.slurm._read_submitit_job_log", lambda *args: None
+        )
+        nested = CancellationAcknowledgement(
+            CancellationStatus.UNKNOWN, "remote owner is unresolved"
+        )
+        original = [
+            replace(_result(0), worker_log="first native log"),
+            replace(
+                _result(1),
+                success=False,
+                error="nested operation diagnostic",
+                worker_log="second native log",
+                cancellation_acknowledgement=nested,
+            ),
+        ]
+        outcome = WorkerOutcome(
+            original, CancellationAcknowledgement(CancellationStatus.CONFIRMED)
+        )
+        received = threading.Event()
+
+        def read(folder: Path) -> WorkerOutcome:
+            received.set()
+            return outcome
+
+        monkeypatch.setattr("artisan_submitit.slurm.read_worker_outcome", read)
+        router = _router(transport, tmp_path, units_per_worker=2)
+        router.dispatch(_units(2), MagicMock())
+        assert received.wait(2)
+        router.cancel()
+        router._thread.join(2)
+        results = router.collect()
+
+        assert [result.execution_run_ids for result in results] == [["0"], ["1"]]
+        assert [result.worker_log for result in results] == [
+            "first native log",
+            "second native log",
+        ]
+        assert all(not result.success for result in results)
+        assert all(
+            result.cancellation_acknowledgement.status is CancellationStatus.UNKNOWN
+            for result in results
+        )
+        assert results[1].error == "nested operation diagnostic"
+        assert results[1].cancellation_acknowledgement == nested
+        assert router.cancel().status is CancellationStatus.UNKNOWN
 
     def test_late_promotion_after_deadline_still_cancels_exact_job(
         self, tmp_path, transport, monkeypatch

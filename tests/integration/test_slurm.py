@@ -6,6 +6,7 @@ import os
 import subprocess
 import time
 from collections.abc import Callable
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -84,10 +85,15 @@ def _cancel_exact_jobs(job_ids: list[str]) -> None:
         )
 
 
-def _assert_confirmed(delta_root: Path, result: StepResult) -> None:
+def _assert_cancellation(
+    delta_root: Path,
+    result: StepResult,
+    status: StepStatus = StepStatus.CANCELLED,
+    cancellation: CancellationStatus = CancellationStatus.CONFIRMED,
+) -> None:
     """Check returned and persisted cancellation without accepting outputs."""
-    assert result.status is StepStatus.CANCELLED, result
-    assert result.cancellation_status is CancellationStatus.CONFIRMED, result
+    assert result.status is status, result
+    assert result.cancellation_status is cancellation, result
     assert result.succeeded_count == 0
     rows = (
         pl.read_delta(delta_root / "orchestration" / "steps")
@@ -95,12 +101,12 @@ def _assert_confirmed(delta_root: Path, result: StepResult) -> None:
         .sort("state_sequence")
     )
     terminal = rows.row(-1, named=True)
-    assert terminal["status"] == "cancelled"
-    assert terminal["cancellation_status"] == "confirmed"
+    assert terminal["status"] == status.value
+    assert terminal["cancellation_status"] == cancellation.value
     assert rows["logical_commit_id"].null_count() == rows.height
 
 
-def _accounting(job_id: str) -> tuple[str, str] | None:
+def _accounting(job_id: str) -> dict[str, str] | None:
     """Read fresh independent scheduler state for the exact top-level job."""
     completed = subprocess.run(
         [
@@ -109,23 +115,39 @@ def _accounting(job_id: str) -> tuple[str, str] | None:
             "--parsable2",
             "--jobs",
             job_id,
-            "--format=JobID,State,Start",
+            "--format=JobID%64,State%40,Submit,Start,End",
         ],
         capture_output=True,
         text=True,
         check=True,
         timeout=5,
+        env={**os.environ, "TZ": "UTC", "SLURM_TIME_FORMAT": "%Y-%m-%dT%H:%M:%S"},
     )
     for line in completed.stdout.splitlines():
-        identifier, state, start = line.split("|")[:3]
+        identifier, state, submitted, start, end = line.split("|")[:5]
         if identifier == job_id:
-            return state, start
+            return {"state": state, "submit": submitted, "start": start, "end": end}
     return None
 
 
-def test_multi_batch_arrays_cross_scheduler_limit(tmp_path: Path) -> None:
-    """Five units packed by two become three jobs across three arrays."""
-    runner = SlurmRunner(slurm_partition=PARTITION, max_array_size=1)
+def _is_pending(job_id: str) -> bool:
+    """Observe held admission even when accounting has not recorded it yet."""
+    completed = subprocess.run(
+        ["squeue", "--noheader", "--jobs", job_id, "--format=%T"],
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=5,
+    )
+    return completed.stdout.strip() == "PENDING"
+
+
+@pytest.mark.parametrize("max_array_size", [1, 2])
+def test_multi_batch_arrays_cross_scheduler_limit(
+    tmp_path: Path, max_array_size: int
+) -> None:
+    """Five units packed by two cross the limit, including a real task array."""
+    runner = SlurmRunner(slurm_partition=PARTITION, max_array_size=max_array_size)
     pipeline = _pipeline(tmp_path, "slurm_multi_batch")
     output = pipeline.output
     pipeline.run(DataGenerator, name="generate", params={"count": 5, "seed": 42})
@@ -279,7 +301,7 @@ def test_running_cancel_preserves_unrelated_same_named_job(
         result = future.result(timeout=40)
         assert time.monotonic() - started < 35
         pipeline.finalize()
-        _assert_confirmed(tmp_path / "pipeline" / "delta", result)
+        _assert_cancellation(tmp_path / "pipeline" / "delta", result)
         assert routers
         assert all(router.is_done() for router in routers)
         assert all(
@@ -318,14 +340,16 @@ def test_running_cancel_preserves_unrelated_same_named_job(
 def test_queued_cancel_has_non_start_accounting_evidence(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    record_property: Callable[[str, object], None],
 ) -> None:
-    """Cancel a scheduler-held job and independently verify it never started."""
+    """Qualify non-start proof, preserving uncertainty when it is unavailable."""
     pipeline = _pipeline(tmp_path, "queued_cancellation")
     runner = SlurmRunner(
         slurm_partition=PARTITION, slurm_additional_parameters={"hold": True}
     )
     routers = _observe_routers(runner, monkeypatch)
     marker = tmp_path / "never-started"
+    submitted_after = datetime.now(UTC).replace(microsecond=0)
     try:
         future = pipeline.submit(
             ObservableWait,
@@ -338,21 +362,37 @@ def test_queued_cancel_has_non_start_accounting_evidence(
         )
         (job_id,) = routers[0].submitted_job_ids
         _wait_for(
-            lambda: (_accounting(job_id) or ("", ""))[0] == "PENDING",
-            "held job accounting",
+            lambda: _is_pending(job_id),
+            "held job pending in the scheduler",
         )
         assert not (marker / "ready").exists()
         pipeline.cancel()
         result = future.result(timeout=40)
         pipeline.finalize()
-        _assert_confirmed(tmp_path / "delta", result)
         _wait_for(
-            lambda: (_accounting(job_id) or ("", ""))[0].startswith("CANCELLED"),
+            lambda: (_accounting(job_id) or {})
+            .get("state", "")
+            .startswith("CANCELLED"),
             "terminal cancellation accounting",
         )
         state = _accounting(job_id)
         assert state is not None
-        assert state[1] in {"Unknown", "None", ""}, state
+        try:
+            submitted = datetime.fromisoformat(state["submit"]).replace(tzinfo=UTC)
+            ended = datetime.fromisoformat(state["end"]).replace(tzinfo=UTC)
+            qualified = (
+                state["start"] == "Unknown" and submitted_after <= submitted <= ended
+            )
+        except ValueError:
+            qualified = False
+        record_property("queued_accounting", str(state))
+        record_property("queued_non_start_proof", qualified)
+        _assert_cancellation(
+            tmp_path / "delta",
+            result,
+            StepStatus.CANCELLED if qualified else StepStatus.FAILED,
+            CancellationStatus.CONFIRMED if qualified else CancellationStatus.UNKNOWN,
+        )
         assert not (marker / "ready").exists()
         assert routers[0]._thread is None or not routers[0]._thread.is_alive()
     finally:
