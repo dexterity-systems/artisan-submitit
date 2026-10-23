@@ -20,10 +20,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Scheduler arguments reject abbreviated forms of Artisan-managed resource and
   topology options. Empty GRES overrides preserve portable GPU requests, and
   array/intra-allocation concurrency limits require positive integers.
-- Cancellation retries transient scheduler/process failures through core's
-  idempotent lifecycle contract. Successfully cancelled SLURM handles bypass
-  Submitit's cached result wait so provider collection settles before Artisan
-  finalization returns.
+- Cancellation implements Artisan 0.2.0's typed evidence contract. Workers
+  compose the public local runner for Python and managed-command cleanup;
+  confirmation requires native ownership evidence and terminal transport.
+  Missing or nested uncertain evidence remains UNKNOWN.
+- Cancellation uses one bounded background cleanup budget, persistent per-batch
+  requests, and exact job or validated step IDs. Collection reads atomic provider
+  outcomes without Submitit's unbounded result or watcher waits.
+- Intra-allocation execution rejects asynchronous launch and allocation override
+  options. Current APIs and fresh format-7 stores are required.
+- CI pins the selected core candidate, verifies mounted source revisions, and
+  smoke-tests clean built distributions. Publication requires the actual
+  published Artisan 0.2.0 package to pass the installed-provider smoke.
 - Docker integration modules collect under pytest 9; real `sbatch` and `srun`
   suites exercise the package against the inherited Prefect Submitit container.
 - Submitit result/log directories are unique per router invocation, preventing

@@ -60,8 +60,10 @@ Portable operation resources stay in Artisan:
 | `gpus` | `gpus_per_node` | `--gres=gpu:N` |
 | `time_limit` | converted to `timeout_min` | `--time` |
 
-Both runners use a single-rank topology: one scheduler task launches one
-Artisan worker process. Scale out with execution units, `units_per_worker`, and
+Both runners use a single-rank topology: one scheduler task contains a provider
+wrapper and Artisan's local worker and command supervisor. These processes share
+the task's allocated resources and execute each packed batch sequentially.
+Scale out with execution units, `units_per_worker`, and
 `max_workers`, not with scheduler node or task-count options.
 
 Provider-specific configuration uses Submitit's native names:
@@ -119,16 +121,27 @@ Each scheduler handle's stdout and stderr are attached to the corresponding
 results. Reads include NFS metadata-cache invalidation and a short retry for
 late log flushing.
 
-Cancellation targets exact handles only:
+Cancellation first asks Artisan's local runner inside each task to stop its
+workers and managed commands. The provider confirms cancellation only after
+receiving ownership evidence and observing transport completion. A successful
+`scancel` request or an exited launcher alone cannot prove worker cleanup.
 
-- `SlurmRunner` checks terminal state and requires successful `scancel` for
-  jobs it submitted;
-- `SlurmIntraRunner` terminates its own `Popen` handles, waits for one grace
-  period, then kills survivors.
+Both routers return Artisan's typed cancellation acknowledgement: `REQUESTED`
+while cleanup is pending, `CONFIRMED` after proven cleanup or non-admission,
+`REJECTED` when work already completed naturally, and `UNKNOWN` when required
+evidence is missing. Nested compute-provider uncertainty remains `UNKNOWN`.
+Idle cancellation returns `REJECTED` and does not affect later dispatch.
 
-No job-name-wide `scancel` query is used.
-Cancellation before dispatch is an idle no-op, and a failed scheduler or
-process cancellation remains retryable.
+Cleanup uses one 25-second provider budget within Artisan's 30-second
+confirmation allowance. Workers have up to 10 seconds to cooperate before
+exact scheduler or launcher termination. A hung filesystem or submission call
+can outlive that budget; the caller receives `UNKNOWN` instead of a cleanup
+guarantee. `cancel()` itself performs no filesystem or scheduler I/O.
+
+`SlurmRunner` uses fresh exact `sacct` records and cancels only its owned jobs.
+`SlurmIntraRunner` cancels only validated steps in its original allocation and
+its own launchers. Missing step identity never permits allocation-wide
+cancellation. Failed cancellation requests remain retryable within the budget.
 
 ## Intra-allocation execution
 
@@ -141,7 +154,9 @@ python examples/srun_pipeline.py
 
 `RunnerResources.extra` supports `slurm_gres` and an explicit `srun_args` list
 for this runner. Use `srun_args` only for flags that do not replace the
-single-rank topology or portable resources. Scheduler placement such as
+single-rank topology or portable resources. Asynchronous `srun` and allocation
+overrides (`--async`, `--jobid`, including abbreviations) are rejected.
+Scheduler placement such as
 partition and account belongs to the command that created the allocation.
 Every router uses a unique work directory so concurrent pipelines cannot
 collide on step indexes.
@@ -219,9 +234,10 @@ pipeline.run(MyOperation, step_runner=SlurmRunner())
 pipeline.run(MyOperation, step_runner=SlurmIntraRunner())
 ```
 
-There are deliberately no `Runner.SLURM`, `Runner.SLURM_INTRA`, or string-name
-compatibility shims. Historical runner names remain in persisted provenance;
-resuming such a pipeline requires supplying the matching provider instance.
+Use current Artisan 0.2.0 APIs and a fresh format-7 store. Older APIs and store
+formats are unsupported. Resuming a pipeline created with this release requires
+supplying the matching provider instance; persisted runner names are provenance,
+not an executable runner configuration.
 
 ## License
 

@@ -30,8 +30,10 @@ step = pipeline.run(
 
 ## Resource ownership
 
-Each array entry launches one Artisan worker as a single scheduler task and
-rank. Use `BatchStrategy` to control how execution units are packed and how
+Each array entry runs a provider wrapper, one Artisan local worker, and its
+command supervisor inside a single scheduler task and rank. The extra processes
+share the allocated resources; a packed batch still executes sequentially.
+Use `BatchStrategy` to control how execution units are packed and how
 many workers run at once. Multi-node and multi-rank worker topologies are not
 supported.
 
@@ -66,3 +68,25 @@ from job names.
 Use `squeue` for live status and `sacct -j <job-id>` for terminal state. Logs
 live beneath the pipeline-provided log directory when one is configured, or
 `slurm_logs/` otherwise.
+
+## Cancellation and evidence
+
+The shared control directory carries a persistent cancellation request to each
+worker. Artisan's public local runner stops the Python worker and its managed
+commands, then publishes ownership evidence. Collection requires that evidence
+and a terminal exact `sacct` record. Keep SLURM accounting available to the
+manager. Records must contain untruncated IDs and timestamps in the requested
+format; stale records from recycled job IDs are ignored.
+
+A queued job can also be confirmed cancelled when accounting proves that it
+never started. `CANCELLED` alone is insufficient. Missing or ambiguous evidence
+produces `UNKNOWN`, even if `scancel` succeeded. Nested compute cancellation
+uncertainty is preserved.
+
+Cancellation closes future array admission, gives native owners up to 10 seconds
+to cooperate, and retries cancellation of exact owned jobs within a shared
+25-second budget. Artisan allows 30 seconds for confirmation. A stuck submission
+or filesystem call may continue after `UNKNOWN`; late promoted jobs retain the
+cancellation request and receive best-effort exact cleanup.
+
+Use [intra-allocation execution](srun.md) when you already own an allocation.
