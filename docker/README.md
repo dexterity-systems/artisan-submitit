@@ -63,6 +63,26 @@ Pass the absolute checkout path and your actual UID/GID; run host Pixi commands
 as your normal user. Keep the same project name through teardown so only this
 qualification cluster and its environment volume are removed.
 
+## Execute the tutorials
+
+The [tutorial notebooks](../docs/tutorials/index.md) run against this cluster
+with the same built-in Artisan operations used on a real site. Inside the
+container, install the notebook environment and select the test partition:
+
+```bash
+/usr/local/bin/pixi install --locked -e tutorials
+export ARTISAN_SLURM_PARTITION=debug
+export ARTISAN_TUTORIAL_ROOT=/workspace/artisan-submitit/tutorial-runs
+/usr/local/bin/pixi run --locked -e tutorials test-tutorial-sbatch
+/usr/local/bin/pixi run --locked -e tutorials test-tutorial-srun
+```
+
+The first task executes the queue and batching notebooks. The second creates an
+allocation and executes the allocation notebook inside it. Each test uses a
+separate directory beneath the shared tutorial root. Executed notebook copies,
+including outputs from failed cells, are retained under `slurm_logs/tutorials/`.
+The source notebooks keep their outputs empty.
+
 ## Useful commands
 
 ```bash

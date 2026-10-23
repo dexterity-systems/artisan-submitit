@@ -17,6 +17,22 @@ The package contains no Prefect dependency or compatibility layer. It exports:
 pip install artisan-submitit
 ```
 
+## Tutorials
+
+The [runnable notebooks](docs/tutorials/index.md) use operations imported from
+Artisan to generate CSV files, transform them, calculate metrics, and run managed
+commands. They cover `SlurmRunner`, `SlurmIntraRunner`, and both levels of
+batching, with assertions that check the resulting data.
+
+From a development checkout, start Jupyter with:
+
+```bash
+~/.pixi/bin/pixi run --locked -e tutorials tutorials
+```
+
+Follow the tutorial setup instructions for shared paths, cluster settings, and
+starting the allocation notebook's kernel inside `salloc`.
+
 ## Usage
 
 ```python

@@ -12,6 +12,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `SlurmRunner` for Submitit-managed SLURM job arrays.
 - `SlurmIntraRunner` for bounded `srun` execution inside an allocation.
 - Unit, real-SLURM Docker, packaging, documentation, and release workflows.
+- Runnable tutorials using Artisan's built-in operations for queue execution,
+  existing allocations, batching, and managed commands, with a Pixi notebook
+  environment and real-SLURM notebook tests.
 
 ### Changed
 

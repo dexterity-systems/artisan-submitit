@@ -84,6 +84,12 @@ nodejs = ">=20,<25"
 jupyter-book = ">=2.0.0"
 mystmd = ">=1.3.0"
 
+[tool.pixi.feature.tutorials.pypi-dependencies]
+jupyterlab = ">=4,<5"
+ipykernel = ">=6,<8"
+nbclient = ">=0.10,<1"
+nbformat = ">=5,<6"
+
 [tool.pixi.feature.dev.tasks]
 fmt = "ruff format . && ruff check --fix ."
 typecheck = "mypy src"
@@ -102,6 +108,17 @@ docs-build = { cmd = "jupyter-book build --html", cwd = "docs" }
 docs-clean = { cmd = "jupyter-book clean", cwd = "docs" }
 docs-serve = { cmd = "python -m http.server -d _build/html 8000", cwd = "docs" }
 
+[tool.pixi.feature.tutorials.tasks]
+tutorials = "jupyter lab docs/tutorials"
+test-tutorial-sbatch = "python -m pytest -p no:cacheprovider --run-slurm tests/integration/test_tutorials.py -k sbatch"
+test-tutorial-srun = { cmd = """bash -c '
+allocation=(--partition "${ARTISAN_SLURM_PARTITION:-cpu}" --ntasks=2 --mem=4G --time=00:15:00)
+if [[ -n "${ARTISAN_SLURM_ACCOUNT:-}" ]]; then
+    allocation+=(--account "$ARTISAN_SLURM_ACCOUNT")
+fi
+exec salloc "${allocation[@]}" -- python -m pytest -p no:cacheprovider --run-slurm tests/integration/test_tutorials.py -k srun
+'""" }
+
 [tool.pixi.tasks]
 setup = "bash scripts/setup.sh"
 slurm-build = "docker compose -f docker/docker-compose.yml build"
@@ -116,6 +133,7 @@ slurm-test-srun = "docker compose -f docker/docker-compose.yml exec -T -u docker
 default = { solve-group = "default" }
 dev = { features = ["dev"], solve-group = "default" }
 docs = { features = ["docs"], no-default-feature = true }
+tutorials = { features = ["dev", "tutorials"], solve-group = "default" }
 
 [tool.pytest.ini_options]
 minversion = "7"
@@ -160,6 +178,7 @@ isort.required-imports = ["from __future__ import annotations"]
 "src/artisan_submitit/srun_worker.py" = ["T20"]
 "examples/**" = ["T201"]
 "scripts/smoke_distribution.py" = ["PLC0415"]
+"docs/tutorials/*.ipynb" = ["T201"]
 "tests/**" = ["ARG001", "ARG002", "ARG005", "EM101", "PLC0415", "PLW1510", "PTH", "RUF059", "SIM117"]
 
 [tool.mypy]

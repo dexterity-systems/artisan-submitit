@@ -10,6 +10,7 @@ on:
       - src/**
       - scripts/verify_sources.py
       - tests/integration/**
+      - docs/tutorials/**
       - pyproject.toml
       - pixi.lock
       - .github/workflows/slurm-docker.yaml
@@ -65,6 +66,18 @@ jobs:
         run: pixi run --locked slurm-test-sbatch
       - name: Test srun runner
         run: pixi run --locked slurm-test-srun
+      - name: Install locked tutorial environment
+        run: docker compose -f docker/docker-compose.yml exec -T -u docker slurm /usr/local/bin/pixi install --locked -e tutorials
+      - name: Execute sbatch tutorials
+        run: docker compose -f docker/docker-compose.yml exec -T -u docker -e ARTISAN_SLURM_PARTITION=debug slurm env -u PYTHONPATH /usr/local/bin/pixi run --locked -e tutorials test-tutorial-sbatch
+      - name: Execute srun tutorial
+        run: docker compose -f docker/docker-compose.yml exec -T -u docker -e ARTISAN_SLURM_PARTITION=debug slurm env -u PYTHONPATH /usr/local/bin/pixi run --locked -e tutorials test-tutorial-srun
+      - name: Retain executed tutorials
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: executed-tutorials
+          path: artisan-submitit/slurm_logs/tutorials/**/*.ipynb
       - name: Stop cluster
         if: always()
         run: pixi run --locked slurm-down

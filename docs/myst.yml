@@ -6,6 +6,12 @@ project:
   github: https://github.com/dexterity-systems/artisan-submitit
   toc:
     - file: index.md
+    - title: Tutorials
+      children:
+        - file: tutorials/index.md
+        - file: tutorials/01-first-slurm-pipeline.ipynb
+        - file: tutorials/02-inside-an-allocation.ipynb
+        - file: tutorials/03-batching-and-commands.ipynb
     - file: slurm.md
     - file: srun.md
     - file: migration.md
@@ -13,6 +19,8 @@ project:
 site:
   title: artisan-submitit
   nav:
+    - title: Tutorials
+      url: /tutorials
     - title: Queue execution
       url: /slurm
     - title: Intra-allocation execution
@@ -24,3 +32,4 @@ site:
       url: https://github.com/dexterity-systems/artisan-submitit
   options:
     logo_text: artisan-submitit
+    folders: true

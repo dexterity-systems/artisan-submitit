@@ -4,6 +4,9 @@
 Artisan owns pipeline orchestration, records, caching, and artifact commits;
 this package transports execution units through `sbatch` or `srun`.
 
+- [Tutorials](tutorials/index.md) run complete pipelines using Artisan's built-in
+  operations, with notebooks for queue submission, existing allocations, and
+  batching managed commands.
 - [Queue-based execution](slurm.md) configures `SlurmRunner` for Submitit job
   arrays.
 - [Intra-allocation execution](srun.md) configures `SlurmIntraRunner` inside an
