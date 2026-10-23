@@ -95,6 +95,7 @@ test-srun = { cmd = "salloc -n4 --mem=4G -- bash -c 'python -m pytest -p no:cach
 test-srun-docker = { cmd = "salloc -p debug -n4 --mem=4G -- bash -c 'python -m pytest -p no:cacheprovider --run-slurm tests/integration/test_srun.py'", env = { PYTHONPATH = ".", SLURM_TEST_PARTITION = "debug" } }
 build-dist = "rm -rf dist/ && python -m build"
 check-dist = "python -m twine check dist/*"
+smoke-dist = "python scripts/smoke_distribution.py"
 
 [tool.pixi.feature.docs.tasks]
 docs-build = { cmd = "jupyter-book build --html", cwd = "docs" }
@@ -158,6 +159,7 @@ isort.required-imports = ["from __future__ import annotations"]
 [tool.ruff.lint.per-file-ignores]
 "src/artisan_submitit/srun_worker.py" = ["T20"]
 "examples/**" = ["T201"]
+"scripts/smoke_distribution.py" = ["PLC0415"]
 "tests/**" = ["ARG001", "ARG002", "ARG005", "EM101", "PLC0415", "PLW1510", "PTH", "RUF059", "SIM117"]
 
 [tool.mypy]

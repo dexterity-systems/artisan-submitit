@@ -8,6 +8,7 @@ on:
     paths:
       - docker/**
       - src/**
+      - scripts/verify_sources.py
       - tests/integration/**
       - pyproject.toml
       - pixi.lock
@@ -24,7 +25,8 @@ jobs:
       contains(github.event.pull_request.labels.*.name, 'test-slurm')
     runs-on: ubuntu-latest
     env:
-      ARTISAN_WORKTREE: ../artisan
+      ARTISAN_WORKTREE: ${{ github.workspace }}/artisan
+      ARTISAN_CORE_REF: ea7bf621b4e2e293d3e6c7c1f82099e44fe48bd8
       PIXI_LOCKED: "1"
     defaults:
       run:
@@ -35,8 +37,10 @@ jobs:
           path: artisan-submitit
       - uses: actions/checkout@v6
         with:
-          repository: dexterity-systems/artisan
+          repository: andrewcolinhunt/artisan-dev
+          ref: ${{ env.ARTISAN_CORE_REF }}
           path: artisan
+          fetch-depth: 0
       - uses: prefix-dev/setup-pixi@v0.10.0
         with:
           manifest-path: artisan-submitit/pyproject.toml
@@ -46,12 +50,17 @@ jobs:
         run: |
           echo "ARTISAN_DOCKER_UID=$(id -u)" >> "$GITHUB_ENV"
           echo "ARTISAN_DOCKER_GID=$(id -g)" >> "$GITHUB_ENV"
+      - name: Validate Compose mounts
+        run: |
+          docker compose -f docker/docker-compose.yml config --format json | python -c 'import json, os, sys; mounts = json.load(sys.stdin)["services"]["slurm"]["volumes"]; assert any(mount.get("source") == os.environ["ARTISAN_WORKTREE"] and mount["target"] == "/workspace/artisan" for mount in mounts)'
       - name: Build cluster
         run: pixi run --locked slurm-build
       - name: Start cluster
         run: pixi run --locked slurm-up
       - name: Install locked environment
         run: pixi run --locked slurm-install
+      - name: Verify container source pair
+        run: docker compose -f docker/docker-compose.yml exec -T -u docker slurm pixi run --locked -e dev python scripts/verify_sources.py /workspace/artisan /workspace/artisan-submitit "$ARTISAN_CORE_REF"
       - name: Test sbatch runner
         run: pixi run --locked slurm-test-sbatch
       - name: Test srun runner
