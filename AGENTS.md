@@ -73,8 +73,12 @@ src/artisan_submitit/
 ├── slurm.py         # Submitit/AutoExecutor runner and lifecycle router
 ├── srun.py          # Intra-allocation runner and process lifecycle router
 ├── srun_worker.py   # Serialized callable/result-file worker protocol
+├── worker.py        # Public native-runner composition and ownership evidence
+├── cancellation.py  # Shared cancellation budget and exact scheduler evidence
 └── utils.py         # Scheduler limits, time parsing, and log helpers
 ```
 
 Artisan owns batching and unit execution. This package owns only transport to
 SLURM and implements the public `artisan.orchestration.runner_api` contract.
+Compute-node ownership composes the public `artisan.orchestration.Runner.LOCAL`
+facade. Do not import core's private execution or supervision implementations.

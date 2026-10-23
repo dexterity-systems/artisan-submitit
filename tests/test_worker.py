@@ -187,6 +187,43 @@ def test_watcher_error_requests_cleanup_and_preserves_uncertainty(
     assert not outcome.results[0].success
 
 
+@patch("artisan_submitit.worker.Runner.LOCAL.create_lifecycle_router")
+def test_native_exception_stops_watcher_without_publishing_closure(
+    factory: MagicMock, tmp_path: Path
+) -> None:
+    factory.return_value.run.side_effect = RuntimeError("native bootstrap failed")
+
+    with pytest.raises(RuntimeError, match="native bootstrap failed"):
+        run_worker_batch([_unit()], _runtime(tmp_path), tmp_path)
+
+    assert read_worker_outcome(tmp_path) is None
+    assert read_worker_identity(tmp_path) is not None
+    assert not any(
+        thread.name == "artisan-submitit-cancel-watcher"
+        for thread in threading.enumerate()
+    )
+
+
+@patch("artisan_submitit.worker.Runner.LOCAL.create_lifecycle_router")
+def test_native_unknown_does_not_wait_for_unresolved_collection(
+    factory: MagicMock, tmp_path: Path
+) -> None:
+    router = factory.return_value
+    router.run.return_value = [_result()]
+    router.is_done.return_value = False
+    router.cancellation_acknowledgement = CancellationAcknowledgement(
+        CancellationStatus.UNKNOWN, "Native cleanup deadline expired"
+    )
+
+    outcome = run_worker_batch([_unit()], _runtime(tmp_path), tmp_path)
+
+    assert outcome.cancellation_acknowledgement.status == CancellationStatus.UNKNOWN
+    assert not outcome.results[0].success
+    assert read_worker_outcome(tmp_path) == outcome
+    router.collect.assert_not_called()
+    router.cancel.assert_not_called()
+
+
 @pytest.mark.parametrize("reader", [read_worker_outcome, read_worker_identity])
 def test_missing_control_file_is_pending(reader: Any, tmp_path: Path) -> None:
     assert reader(tmp_path) is None

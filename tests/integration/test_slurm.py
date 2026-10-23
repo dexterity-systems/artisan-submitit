@@ -3,20 +3,29 @@
 from __future__ import annotations
 
 import os
-import threading
+import subprocess
 import time
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import polars as pl
 import pytest
 import submitit
-from artisan.operations.examples import DataGenerator, DataTransformer, Wait
-from artisan.orchestration import PipelineManager
+from artisan.operations.examples import DataGenerator, DataTransformer
+from artisan.orchestration import (
+    CancellationStatus,
+    PipelineManager,
+    StepResult,
+    StepStatus,
+)
 from artisan.schemas.enums import FailurePolicy
+from artisan.visualization import inspect_worker_log
 
 from artisan_submitit import SlurmRunner
+from artisan_submitit.slurm import SlurmLifecycleRouter
 
-from .operations import FailingWait
+from .operations import FailingWait, ManagedWait, ObservableWait
 
 pytestmark = [pytest.mark.integration, pytest.mark.slurm]
 
@@ -32,9 +41,86 @@ def _pipeline(tmp_path: Path, name: str) -> PipelineManager:
     )
 
 
-def _sleep_and_return(seconds: float) -> str:
-    time.sleep(seconds)
+def _unrelated_heartbeat(heartbeat: Path, stop: Path) -> str:
+    """Expose remote liveness until the test explicitly releases this job."""
+    deadline = time.monotonic() + 120
+    while not stop.exists() and time.monotonic() < deadline:
+        with heartbeat.open("a") as stream:
+            stream.write("alive\n")
+        time.sleep(0.05)
     return "unrelated job completed"
+
+
+def _wait_for(predicate: Callable[[], bool], description: str) -> None:
+    """Bound readiness waits so cancellation tests cannot pass before admission."""
+    deadline = time.monotonic() + 45
+    while not predicate():
+        if time.monotonic() >= deadline:
+            pytest.fail(f"Timed out waiting for {description}")
+        time.sleep(0.05)
+
+
+def _observe_routers(
+    runner: SlurmRunner, monkeypatch: pytest.MonkeyPatch
+) -> list[SlurmLifecycleRouter]:
+    """Retain actual routers for exact cleanup without replacing transport."""
+    routers: list[SlurmLifecycleRouter] = []
+    create = runner.create_lifecycle_router
+
+    def record(*args: Any, **kwargs: Any) -> SlurmLifecycleRouter:
+        router = create(*args, **kwargs)
+        routers.append(router)
+        return router
+
+    monkeypatch.setattr(runner, "create_lifecycle_router", record)
+    return routers
+
+
+def _cancel_exact_jobs(job_ids: list[str]) -> None:
+    """Clean up only handles admitted by this test, including failure paths."""
+    if job_ids:
+        subprocess.run(
+            ["scancel", *job_ids], capture_output=True, check=False, timeout=5
+        )
+
+
+def _assert_confirmed(delta_root: Path, result: StepResult) -> None:
+    """Check returned and persisted cancellation without accepting outputs."""
+    assert result.status is StepStatus.CANCELLED, result
+    assert result.cancellation_status is CancellationStatus.CONFIRMED, result
+    assert result.succeeded_count == 0
+    rows = (
+        pl.read_delta(delta_root / "orchestration" / "steps")
+        .filter(pl.col("step_run_id") == result.step_run_id)
+        .sort("state_sequence")
+    )
+    terminal = rows.row(-1, named=True)
+    assert terminal["status"] == "cancelled"
+    assert terminal["cancellation_status"] == "confirmed"
+    assert rows["logical_commit_id"].null_count() == rows.height
+
+
+def _accounting(job_id: str) -> tuple[str, str] | None:
+    """Read fresh independent scheduler state for the exact top-level job."""
+    completed = subprocess.run(
+        [
+            "sacct",
+            "--noheader",
+            "--parsable2",
+            "--jobs",
+            job_id,
+            "--format=JobID,State,Start",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=5,
+    )
+    for line in completed.stdout.splitlines():
+        identifier, state, start = line.split("|")[:3]
+        if identifier == job_id:
+            return state, start
+    return None
 
 
 def test_multi_batch_arrays_cross_scheduler_limit(tmp_path: Path) -> None:
@@ -128,7 +214,11 @@ def test_operation_failure_and_worker_log_are_preserved(tmp_path: Path) -> None:
     assert summary["overall_success"] is False
     assert step.failed_count == 1
     assert "intentional scheduler operation failure" in failed["error"][0]
-    assert "artisan-submitit worker log marker" in failed["worker_log"][0]
+    worker_log = inspect_worker_log(
+        str(tmp_path / "delta"), failed["execution_run_id"][0]
+    )
+    assert worker_log is not None
+    assert "artisan-submitit worker log marker" in worker_log
 
 
 def test_submission_failure_becomes_aligned_step_failure(tmp_path: Path) -> None:
@@ -144,33 +234,132 @@ def test_submission_failure_becomes_aligned_step_failure(tmp_path: Path) -> None
     assert step.failed_count == 1
 
 
-def test_cancel_does_not_cancel_unrelated_same_named_job(tmp_path: Path) -> None:
-    """Provider cancellation uses its handles, never a broad job-name query."""
+@pytest.mark.parametrize("operation", [ObservableWait, ManagedWait])
+@pytest.mark.timeout(120)
+def test_running_cancel_preserves_unrelated_same_named_job(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    operation: type[ObservableWait] | type[ManagedWait],
+) -> None:
+    """Confirm real worker/command cleanup while an unrelated job stays alive."""
+    heartbeat = tmp_path / "unrelated-heartbeat"
+    stop = tmp_path / "unrelated-stop"
     unrelated = submitit.AutoExecutor(folder=tmp_path / "unrelated" / "%j")
     unrelated.update_parameters(
         slurm_partition=PARTITION,
-        timeout_min=2,
+        timeout_min=3,
         cpus_per_task=1,
         mem_gb=1,
         slurm_job_name="s0_wait",
     )
-    unrelated_job = unrelated.submit(_sleep_and_return, 2.0)
-
+    unrelated_job = unrelated.submit(_unrelated_heartbeat, heartbeat, stop)
     pipeline = _pipeline(tmp_path / "pipeline", "cancel_isolation")
-
-    def cancel_pipeline() -> None:
-        time.sleep(1.0)
+    runner = SlurmRunner(slurm_partition=PARTITION)
+    routers = _observe_routers(runner, monkeypatch)
+    marker = tmp_path / "owned-marker"
+    try:
+        _wait_for(
+            lambda: heartbeat.exists() and heartbeat.stat().st_size > 0,
+            "unrelated job execution",
+        )
+        future = pipeline.submit(
+            operation,
+            name="wait",
+            params={"duration": 60, "marker_root": str(marker)},
+            step_runner=runner,
+            runner_resources={"cpus": 1, "memory_gb": 1, "time_limit": "00:02:00"},
+        )
+        _wait_for(
+            lambda: (marker / "ready").exists()
+            and (operation is ObservableWait or (marker / "heartbeat").exists()),
+            "owned worker execution",
+        )
+        started = time.monotonic()
         pipeline.cancel()
+        result = future.result(timeout=40)
+        assert time.monotonic() - started < 35
+        pipeline.finalize()
+        _assert_confirmed(tmp_path / "pipeline" / "delta", result)
+        assert routers
+        assert all(router.is_done() for router in routers)
+        assert all(
+            router._thread is None or not router._thread.is_alive()
+            for router in routers
+        )
+        before = heartbeat.stat().st_size
+        time.sleep(0.2)
+        assert heartbeat.stat().st_size > before
+        if operation is ManagedWait:
+            settled = (marker / "heartbeat").read_bytes()
+            time.sleep(0.2)
+            assert (marker / "heartbeat").read_bytes() == settled
+        stop.touch()
+        _wait_for(unrelated_job.done, "unrelated job natural completion")
+        assert unrelated_job.result() == "unrelated job completed"
+    finally:
+        stop.touch()
+        try:
+            pipeline.cancel()
+            pipeline.finalize()
+        finally:
+            _cancel_exact_jobs(
+                [
+                    str(unrelated_job.job_id),
+                    *[
+                        job_id
+                        for router in routers
+                        for job_id in router.submitted_job_ids
+                    ],
+                ]
+            )
 
-    threading.Thread(target=cancel_pipeline, daemon=True).start()
-    started = time.monotonic()
-    pipeline.submit(
-        Wait,
-        name="wait",
-        params={"duration": 30},
-        step_runner=SlurmRunner(slurm_partition=PARTITION),
+
+@pytest.mark.timeout(120)
+def test_queued_cancel_has_non_start_accounting_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cancel a scheduler-held job and independently verify it never started."""
+    pipeline = _pipeline(tmp_path, "queued_cancellation")
+    runner = SlurmRunner(
+        slurm_partition=PARTITION, slurm_additional_parameters={"hold": True}
     )
-    pipeline.finalize()
-
-    assert time.monotonic() - started < 20
-    assert unrelated_job.result() == "unrelated job completed"
+    routers = _observe_routers(runner, monkeypatch)
+    marker = tmp_path / "never-started"
+    try:
+        future = pipeline.submit(
+            ObservableWait,
+            params={"duration": 60, "marker_root": str(marker)},
+            step_runner=runner,
+        )
+        _wait_for(
+            lambda: bool(routers and routers[0].submitted_job_ids),
+            "held job submission",
+        )
+        (job_id,) = routers[0].submitted_job_ids
+        _wait_for(
+            lambda: (_accounting(job_id) or ("", ""))[0] == "PENDING",
+            "held job accounting",
+        )
+        assert not (marker / "ready").exists()
+        pipeline.cancel()
+        result = future.result(timeout=40)
+        pipeline.finalize()
+        _assert_confirmed(tmp_path / "delta", result)
+        _wait_for(
+            lambda: (_accounting(job_id) or ("", ""))[0].startswith("CANCELLED"),
+            "terminal cancellation accounting",
+        )
+        state = _accounting(job_id)
+        assert state is not None
+        assert state[1] in {"Unknown", "None", ""}, state
+        assert not (marker / "ready").exists()
+        assert routers[0]._thread is None or not routers[0]._thread.is_alive()
+    finally:
+        try:
+            pipeline.cancel()
+            pipeline.finalize()
+        finally:
+            _cancel_exact_jobs(
+                [job_id for router in routers for job_id in router.submitted_job_ids]
+            )
