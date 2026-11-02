@@ -27,7 +27,7 @@ batching, with assertions that check the resulting data.
 From a development checkout, start Jupyter with:
 
 ```bash
-~/.pixi/bin/pixi run --locked -e tutorials tutorials
+~/.pixi/bin/pixi run -e tutorials tutorials
 ```
 
 Follow the tutorial setup instructions for shared paths, cluster settings, and
@@ -182,16 +182,31 @@ collide on step indexes.
 The Pixi environment expects Artisan in a real sibling `../artisan` checkout:
 
 ```bash
-pixi install --locked -e dev
-pixi run --locked -e dev setup
-pixi run --locked -e dev fmt
-pixi run --locked -e dev typecheck
-pixi run --locked -e dev test
-pixi run --locked -e dev pre-commit run --all-files
-pixi run --locked -e dev build-dist
-pixi run --locked -e dev check-dist
-pixi run --locked -e docs docs-build
+pixi install -e dev
+pixi run -e dev setup
+pixi run -e dev fmt
+pixi run -e dev typecheck
+pixi run -e dev test
+pixi run -e dev pre-commit run --all-files
+pixi run -e dev build-dist
+pixi run -e dev check-dist
+pixi run -e docs docs-build
 ```
+
+Use Pixi 0.83.0. CI and agent checks add `--locked`; local commands above may
+refresh editable metadata without changing `pixi.lock`. Source edits, commits,
+comments, tasks, and version-only edits do not require relocking. After changing
+dependencies, run `pixi lock` explicitly and review the diff.
+
+Each worktree must own its `.pixi/envs`. Share package caches, not installed
+environments. Docker uses a separate detached environment volume per Compose
+project; choose a unique project name when testing another checkout.
+
+The package version is the literal `[project].version` in `pyproject.toml`, and
+`artisan_submitit.__version__` reads installed package metadata. The next ordinary
+or locked Pixi command refreshes that metadata after a version-only edit.
+Release tags must match both built wheel and source-distribution metadata; the
+release workflow checks this before publication.
 
 That sibling is the conventional standalone development layout. Docker does
 not assume it: set `ARTISAN_WORKTREE` explicitly when Artisan uses a nested or
@@ -227,13 +242,13 @@ pixi run slurm-shell
 Then, inside the container:
 
 ```bash
-pixi install --locked -e dev
-pixi run --locked -e dev test-sbatch-docker
-pixi run --locked -e dev test-srun-docker
+pixi install -e dev
+pixi run -e dev test-sbatch-docker
+pixi run -e dev test-srun-docker
 ```
 
-Artisan's source-build fallback allows its editable install even when a mounted
-worktree's `.git` pointer refers to metadata outside the container. Both mounted
+Both packages declare static versions and build without Git metadata, including
+when mounted worktrees have `.git` pointers outside the container. Both mounted
 source trees are also placed on `PYTHONPATH` for submitted jobs.
 
 See the [Docker environment](https://github.com/dexterity-systems/artisan-submitit/blob/main/docker/README.md)

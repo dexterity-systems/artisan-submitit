@@ -12,7 +12,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  PIXI_LOCKED: "1"
+  PIXI_LOCKED: "true"
   ARTISAN_CORE_REF: main
 
 jobs:
@@ -34,7 +34,7 @@ jobs:
       - uses: prefix-dev/setup-pixi@v0.10.0
         with:
           manifest-path: artisan-submitit/pyproject.toml
-          pixi-version: v0.66.0
+          pixi-version: v0.83.0
           environments: dev
           locked: true
       - name: Lint
@@ -60,7 +60,7 @@ jobs:
       - uses: prefix-dev/setup-pixi@v0.10.0
         with:
           manifest-path: artisan-submitit/pyproject.toml
-          pixi-version: v0.66.0
+          pixi-version: v0.83.0
           environments: dev
           locked: true
       - name: Run pre-commit
@@ -84,7 +84,7 @@ jobs:
       - uses: prefix-dev/setup-pixi@v0.10.0
         with:
           manifest-path: artisan-submitit/pyproject.toml
-          pixi-version: v0.66.0
+          pixi-version: v0.83.0
           environments: dev
           locked: true
       - name: Verify source pair
@@ -113,15 +113,15 @@ jobs:
       - uses: prefix-dev/setup-pixi@v0.10.0
         with:
           manifest-path: artisan-submitit/pyproject.toml
-          pixi-version: v0.66.0
+          pixi-version: v0.83.0
           environments: dev
           locked: true
       - name: Build distribution
         run: pixi run --locked -e dev build-dist
       - name: Check distribution
         run: pixi run --locked -e dev check-dist
-      - name: Build candidate core wheel with temporary release version
-        run: pixi run --locked -e dev env SETUPTOOLS_SCM_PRETEND_VERSION=0.2.0 python -m build --wheel --outdir ../artisan/dist ../artisan
+      - name: Build candidate core wheel with its declared version
+        run: pixi run --locked -e dev python -m build --wheel --outdir ../artisan/dist ../artisan
       - name: Qualify installed candidate distributions
         run: pixi run --locked -e dev smoke-dist dist/*.whl --core-wheel ../artisan/dist/*.whl
 
@@ -143,7 +143,7 @@ jobs:
       - uses: prefix-dev/setup-pixi@v0.10.0
         with:
           manifest-path: artisan-submitit/pyproject.toml
-          pixi-version: v0.66.0
+          pixi-version: v0.83.0
           environments: docs
           locked: true
       - name: Build documentation

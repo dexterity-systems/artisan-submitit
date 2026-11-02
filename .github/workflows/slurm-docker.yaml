@@ -28,7 +28,7 @@ jobs:
     env:
       ARTISAN_WORKTREE: ${{ github.workspace }}/artisan
       ARTISAN_CORE_REF: main
-      PIXI_LOCKED: "1"
+      PIXI_LOCKED: "true"
     defaults:
       run:
         working-directory: artisan-submitit
@@ -45,7 +45,7 @@ jobs:
       - uses: prefix-dev/setup-pixi@v0.10.0
         with:
           manifest-path: artisan-submitit/pyproject.toml
-          pixi-version: v0.66.0
+          pixi-version: v0.83.0
           locked: true
       - name: Configure container ownership
         run: |

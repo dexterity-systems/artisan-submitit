@@ -5,7 +5,7 @@ USER root
 # Pixi supplies Python and both editable project environments. Keep the image
 # on the same version required by the checked-in lock configuration.
 RUN curl -fsSL https://pixi.sh/install.sh | \
-    PIXI_HOME=/usr/local PIXI_VERSION=0.66.0 bash
+    PIXI_HOME=/usr/local PIXI_VERSION=0.83.0 bash
 RUN pixi config set detached-environments /pixi-env --system
 
 # SLURM accounting is required for realistic job-state integration tests.
