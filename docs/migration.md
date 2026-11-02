@@ -20,9 +20,9 @@ The old implementation cancelled by job name in Artisan core. The provider
 stores exact Submitit jobs and `Popen` values, so cancellation cannot affect an
 unrelated run with the same operation or step name.
 
-## Artisan 0.2.0 stores and APIs
+## Artisan 0.2.0 development stores and APIs
 
-Start with a fresh format-7 store and use current Artisan 0.2.0 APIs. This release
+Start with a fresh format-7 store and use Artisan 0.2.0.dev0 or newer. This release
 does not provide old-store migration or backward-compatibility shims. Import
 `SlurmRunner` or `SlurmIntraRunner` directly from `artisan_submitit` and pass an
 instance to `PipelineManager` or an individual step.

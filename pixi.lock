@@ -3246,7 +3246,7 @@ packages:
   name: artisan-submitit
   requires_dist:
   - cloudpickle>=3,<4
-  - dexterity-artisan>=0.2.0
+  - dexterity-artisan>=0.2.0.dev0
   - submitit>=1.5,<2
   requires_python: '>=3.12'
 - pypi: https://files.pythonhosted.org/packages/02/36/ecc85bc96c273dc8a11273ed4782272975e6338d4a3e9228621175edf0e3/jaraco_functools-4.6.0-py3-none-any.whl

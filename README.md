@@ -57,7 +57,7 @@ its built-in local runner.
 ## Requirements
 
 - Python 3.12 or newer;
-- `dexterity-artisan` 0.2.0 or newer, which provides
+- `dexterity-artisan` 0.2.0.dev0 or newer, which provides
   `artisan.orchestration.runner_api`;
 - Submitit 1.5 or newer;
 - a shared filesystem visible at the same paths from the pipeline manager and
@@ -218,11 +218,16 @@ symlink to a differently named worktree makes the otherwise portable lock look
 stale. `ARTISAN_WORKTREE` has no such restriction because Compose always mounts
 the selected source at `/workspace/artisan`.
 
-Until `dexterity-artisan` 0.2.0 is published, Pixi explicitly overrides the
-provider's release dependency with the sibling checkout. CI creates the same
-sibling layout by checking out Artisan beside this repository. Merge and
-publish the compatible Artisan release before publishing `artisan-submitit`,
-then remove the temporary dependency override and regenerate `pixi.lock`.
+The sibling checkout must satisfy `dexterity-artisan>=0.2.0.dev0`, including
+current development builds. CI creates the same sibling layout and qualifies
+both candidate wheels together in a fresh environment with normal dependency
+resolution and `pip check`.
+
+Release qualification installs the provider wheel alone, letting its declared
+dependency select a compatible published core from PyPI. Publish a compatible
+core before publishing `artisan-submitit`; the currently published 0.1.x core
+versions do not satisfy this requirement. No source override is used for release
+qualification.
 
 The focused guides in `docs/` build as a small Jupyter Book 2 site and are
 validated in CI.
@@ -265,7 +270,7 @@ pipeline.run(MyOperation, step_runner=SlurmRunner())
 pipeline.run(MyOperation, step_runner=SlurmIntraRunner())
 ```
 
-Use current Artisan 0.2.0 APIs and a fresh format-7 store. Older APIs and store
+Use Artisan 0.2.0.dev0 or newer APIs and a fresh format-7 store. Older APIs and store
 formats are unsupported. Resuming a pipeline created with this release requires
 supplying the matching provider instance; persisted runner names are provenance,
 not an executable runner configuration.

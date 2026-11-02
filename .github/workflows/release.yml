@@ -34,7 +34,7 @@ jobs:
           RELEASE_VERSION: ${{ github.event.release.tag_name }}
         run: python scripts/check_release.py
 
-      - name: Qualify installed provider with published Artisan 0.2.0
+      - name: Qualify installed provider with a compatible published Artisan
         run: python scripts/smoke_distribution.py dist/*.whl
 
       - name: Upload artifacts

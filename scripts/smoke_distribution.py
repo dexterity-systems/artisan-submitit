@@ -10,13 +10,39 @@ import subprocess
 import sys
 import tempfile
 import venv
+from importlib.metadata import requires, version
 from pathlib import Path
+
+from packaging.requirements import Requirement
+from packaging.utils import canonicalize_name
+
+
+def _check_core_requirement() -> str:
+    """Require the installed core to satisfy the provider's declared dependency."""
+    requirements = []
+    for value in requires("artisan-submitit") or []:
+        requirement = Requirement(value)
+        if canonicalize_name(requirement.name) == "dexterity-artisan" and (
+            requirement.marker is None or requirement.marker.evaluate()
+        ):
+            requirements.append(requirement)
+    if len(requirements) != 1:
+        message = (
+            "Expected one active dexterity-artisan dependency in provider metadata"
+        )
+        raise ValueError(message)
+    requirement = requirements[0]
+    core_version = version("dexterity-artisan")
+    if core_version not in requirement.specifier:
+        message = (
+            f"Installed dexterity-artisan {core_version} does not satisfy {requirement}"
+        )
+        raise ValueError(message)
+    return core_version
 
 
 def _check_installed() -> None:
     """Exercise the installed provider without importing either source checkout."""
-    from importlib.metadata import version
-
     import artisan
     from artisan.operations.examples import CsvHead, DataGenerator
     from artisan.orchestration import PipelineManager
@@ -26,8 +52,9 @@ def _check_installed() -> None:
     from artisan_submitit import SlurmIntraRunner, SlurmRunner
 
     for module in (artisan, artisan_submitit):
+        assert module.__file__ is not None
         assert Path(module.__file__).resolve().is_relative_to(Path(sys.prefix))
-    assert artisan.__version__ == version("dexterity-artisan") == "0.2.0"
+    assert artisan.__version__ == _check_core_requirement()
     assert artisan_submitit.__version__ == version("artisan-submitit")
     assert SlurmRunner().name == "slurm"
     _install_local_srun(Path.cwd())
@@ -93,7 +120,9 @@ def _qualify(provider_wheel: Path, core_wheel: Path | None) -> None:
         environment = os.environ.copy()
         environment.pop("PYTHONPATH", None)
         environment.pop("PYTHONHOME", None)
-        core = str(core_wheel.resolve()) if core_wheel else "dexterity-artisan==0.2.0"
+        candidates = [str(provider_wheel.resolve())]
+        if core_wheel is not None:
+            candidates.append(str(core_wheel.resolve()))
         subprocess.run(
             [
                 python,
@@ -104,8 +133,7 @@ def _qualify(provider_wheel: Path, core_wheel: Path | None) -> None:
                 "install",
                 "--index-url",
                 "https://pypi.org/simple",
-                core,
-                str(provider_wheel.resolve()),
+                *candidates,
             ],
             check=True,
             cwd=root,
@@ -126,7 +154,7 @@ def _qualify(provider_wheel: Path, core_wheel: Path | None) -> None:
 
 
 def main() -> None:
-    """Use a core wheel only for candidate CI; releases require published 0.2.0."""
+    """Use a core wheel for candidate CI; otherwise resolve the published dependency."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("provider_wheel", type=Path, nargs="?")
     parser.add_argument("--core-wheel", type=Path)
