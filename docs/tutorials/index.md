@@ -45,8 +45,8 @@ packages and Jupyter. Follow the [development checkout setup](https://github.com
 then run:
 
 ```bash
-~/.pixi/bin/pixi install --locked -e tutorials
-~/.pixi/bin/pixi run --locked -e tutorials tutorials
+~/.pixi/bin/pixi install -e tutorials
+~/.pixi/bin/pixi run -e tutorials tutorials
 ```
 
 The same environment variables configure both installation methods. If
@@ -62,7 +62,7 @@ environment variables above and any account options required by your site:
 ```bash
 # Add --account=your-account if your site requires it.
 salloc --partition="$ARTISAN_SLURM_PARTITION" --ntasks=2 --mem=4G --time=00:15:00
-~/.pixi/bin/pixi run --locked -e tutorials tutorials
+~/.pixi/bin/pixi run -e tutorials tutorials
 ```
 
 For the pip installation, use `python -m jupyterlab docs/tutorials` in that shell.
@@ -84,13 +84,13 @@ The tutorial tests execute the notebooks themselves and retain executed copies
 under `slurm_logs/tutorials/`. From a shell with scheduler access, run:
 
 ```bash
-~/.pixi/bin/pixi run --locked -e tutorials test-tutorial-sbatch
-~/.pixi/bin/pixi run --locked -e tutorials test-tutorial-srun
+~/.pixi/bin/pixi run -e tutorials test-tutorial-sbatch
+~/.pixi/bin/pixi run -e tutorials test-tutorial-srun
 ```
 
 The second task creates an allocation for the kernel. Set
 `ARTISAN_TUTORIAL_ROOT` to a shared location for tests as well as interactive use.
 For the local test cluster, follow the [Docker instructions](https://github.com/dexterity-systems/artisan-submitit/blob/main/docker/README.md).
 Commit notebooks with empty outputs. The separate
-`~/.pixi/bin/pixi run --locked -e docs docs-build` task renders the site; notebook
+`~/.pixi/bin/pixi run -e docs docs-build` task renders the site; notebook
 execution is checked by the scheduler tests.

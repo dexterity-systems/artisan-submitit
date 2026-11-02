@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
-from artisan_submitit._version import __version__, __version_tuple__
+from importlib.metadata import version
+
 from artisan_submitit.slurm import SlurmRunner
 from artisan_submitit.srun import SlurmIntraRunner
 
-__all__ = ["SlurmIntraRunner", "SlurmRunner", "__version__", "__version_tuple__"]
+__version__ = version("artisan-submitit")
+
+__all__ = ["SlurmIntraRunner", "SlurmRunner", "__version__"]

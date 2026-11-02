@@ -23,6 +23,10 @@ pixi run slurm-up
 pixi run slurm-shell
 ```
 
+`slurm-up` waits until SLURM responds and the container has made its Pixi
+environment volume writable by the development user. Startup fails if ownership
+setup fails or the service does not become healthy within 180 seconds.
+
 The UID/GID variables let the container's unprivileged `docker` user write
 generated editable-install metadata and pytest state without changing bind-
 mounted repository ownership.
@@ -44,11 +48,16 @@ The Compose environment mounts:
 
 Both source trees are on `PYTHONPATH`, including inside submitted SLURM jobs.
 The environment installs the provider and mounted Artisan worktree as editable
-projects. Artisan's packaging fallback supports worktree mounts whose `.git`
-pointer refers to host-only metadata. Source edits in either repository are
-visible without rebuilding the image. Re-run the locked install after source
-changes that affect dynamic version metadata, and regenerate the lock on the
-host when the dependency set changes.
+projects. Both packages build without Git metadata, so worktree mounts whose
+`.git` pointers refer to host-only metadata are supported. Source edits in either
+repository are visible without rebuilding the image. Ordinary and locked Pixi
+commands refresh version-only metadata without changing the lock. Regenerate
+the lock deliberately on the host when the dependency set changes.
+
+Use Pixi 0.83.0. Each host worktree owns its `.pixi/envs`; the container deliberately
+uses a detached environment volume at `/pixi-env`. Keep a unique Compose project
+name and volume for each checkout, and never share this installed environment
+with another worktree. Package caches may be shared.
 
 For release qualification, record both Git revisions, imported module paths,
 the `debug` partition/allocation, and each suite's pass/fail/skip counts. The

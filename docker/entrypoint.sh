@@ -1,6 +1,8 @@
 #!/bin/bash
 set -e
 
+rm -f /run/artisan-submitit-ready
+
 # Match the development user to the bind-mount owner without changing host
 # repository ownership. The defaults match the upstream image's docker user.
 ARTISAN_DOCKER_UID=${ARTISAN_DOCKER_UID:-1000}
@@ -67,6 +69,8 @@ for attempt in $(seq 1 30); do
     sleep 1
 done
 
-chown -R docker:docker /home/docker /pixi-env 2>/dev/null || true
+chown -R docker:docker /home/docker /pixi-env
+runuser -u docker -- test -w /pixi-env
+touch /run/artisan-submitit-ready
 
 exec runuser -u docker -- "$@"

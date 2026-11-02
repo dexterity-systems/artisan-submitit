@@ -11,8 +11,15 @@ Project conventions for contributors (human and AI).
 | Type checking | mypy |
 | Testing | Pytest |
 
-Always use the full Pixi path when running commands. Use `--locked` for routine
-commands so the lock file is not rewritten unexpectedly.
+Always use the full Pixi path when running commands. Use Pixi 0.83.0. CI and
+agent verification use `--locked` for work that does not change dependencies.
+Local development uses ordinary `pixi install` and `pixi run`; source edits,
+commits, comments, tasks, and version-only edits do not require lock updates.
+After changing dependencies, run `pixi lock` deliberately and review the diff.
+Each worktree must own its `.pixi/envs`; do not share installed environments
+through symlinks, mounts, or detached-environment configuration. Package caches
+may be shared. The Docker cluster deliberately uses its own detached environment
+volume; use a separate Compose project and volume for each checkout.
 
 ## Commands
 
@@ -37,8 +44,12 @@ The development environment expects a real sibling Artisan checkout at
 `../artisan`; a symlink is not Pixi-lock portable. Set `ARTISAN_WORKTREE` to any
 Artisan checkout or nested worktree for Docker commands.
 
-Versions come from Git tags through hatch-vcs. Do not edit the generated,
-gitignored `src/artisan_submitit/_version.py`.
+The literal `[project].version` in `pyproject.toml` defines the package version.
+The public `__version__` reads installed distribution metadata. A version-only
+edit refreshes editable metadata on the next ordinary or locked Pixi command,
+without rewriting the lock. No Git metadata or generated version file is needed.
+Before a release, update the literal version deliberately; the release workflow
+checks both built artifacts against the intended tag before publication.
 
 ## Code Style
 
