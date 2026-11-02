@@ -18,6 +18,15 @@ services:
       PYTHONPATH: /workspace/artisan/src:/workspace/artisan-submitit/src:/workspace/artisan-submitit
       PYTHONDONTWRITEBYTECODE: "1"
       SLURM_TEST_PARTITION: debug
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "test -f /run/artisan-submitit-ready && squeue --noheader",
+        ]
+      interval: 2s
+      timeout: 5s
+      retries: 60
     tty: true
     stdin_open: true
 

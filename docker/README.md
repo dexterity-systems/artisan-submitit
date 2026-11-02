@@ -23,6 +23,10 @@ pixi run slurm-up
 pixi run slurm-shell
 ```
 
+`slurm-up` waits until SLURM responds and the container has made its Pixi
+environment volume writable by the development user. Startup fails if ownership
+setup fails or the service does not become healthy within 180 seconds.
+
 The UID/GID variables let the container's unprivileged `docker` user write
 generated editable-install metadata and pytest state without changing bind-
 mounted repository ownership.

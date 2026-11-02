@@ -108,7 +108,7 @@ exec salloc "${allocation[@]}" -- python -m pytest -p no:cacheprovider --run-slu
 [tool.pixi.tasks]
 setup = "bash scripts/setup.sh"
 slurm-build = "docker compose -f docker/docker-compose.yml build"
-slurm-up = "docker compose -f docker/docker-compose.yml up -d"
+slurm-up = "docker compose -f docker/docker-compose.yml up -d --wait --wait-timeout 180"
 slurm-down = "docker compose -f docker/docker-compose.yml down -v"
 slurm-shell = "docker compose -f docker/docker-compose.yml exec -u docker slurm bash"
 slurm-install = "docker compose -f docker/docker-compose.yml exec -T -u docker slurm pixi install --locked -e dev"
