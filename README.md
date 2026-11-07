@@ -179,6 +179,9 @@ collide on step indexes.
 
 ## Development and Docker
 
+Follow the [committed-content policy](AGENTS.md#committed-content) when adding
+code, tests, documentation, or captured results.
+
 The Pixi environment expects Artisan in a real sibling `../artisan` checkout:
 
 ```bash
