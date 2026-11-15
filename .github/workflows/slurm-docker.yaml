@@ -10,6 +10,7 @@ on:
       - src/**
       - scripts/verify_sources.py
       - tests/integration/**
+      - tests/qualification/**
       - docs/tutorials/**
       - pyproject.toml
       - pixi.lock
@@ -25,10 +26,12 @@ jobs:
       github.event_name == 'workflow_dispatch' ||
       contains(github.event.pull_request.labels.*.name, 'test-slurm')
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     env:
-      ARTISAN_WORKTREE: ${{ github.workspace }}/artisan
       ARTISAN_CORE_REF: main
       PIXI_LOCKED: "true"
+      QUALIFICATION_ROOT: ${{ runner.temp }}/artisan-slurm-qualification
+      QUALIFICATION_CONTAINER: artisan-slurm-ci-${{ github.run_id }}-${{ github.run_attempt }}
     defaults:
       run:
         working-directory: artisan-submitit
@@ -46,38 +49,209 @@ jobs:
         with:
           manifest-path: artisan-submitit/pyproject.toml
           pixi-version: v0.83.0
+          environments: dev
           locked: true
-      - name: Configure container ownership
+      - name: Verify source pair
+        run: ~/.pixi/bin/pixi run --locked -e dev python scripts/verify_sources.py ../artisan . "$ARTISAN_CORE_REF"
+      - name: Build scheduler image and measure node interpreter
         run: |
-          echo "ARTISAN_DOCKER_UID=$(id -u)" >> "$GITHUB_ENV"
-          echo "ARTISAN_DOCKER_GID=$(id -g)" >> "$GITHUB_ENV"
-      - name: Validate Compose mounts
+          set -euo pipefail
+          mkdir -p "$QUALIFICATION_ROOT/config" "$QUALIFICATION_ROOT/work/profile/wheels" "$QUALIFICATION_ROOT/work/evidence/tutorials"
+          docker --context default build -t artisan-submitit-ci:current docker
+          qualification_image=$(docker --context default image inspect artisan-submitit-ci:current --format '{{.Id}}')
+          printf '%s\n' "$qualification_image" > "$QUALIFICATION_ROOT/config/image-id"
+          printf 'QUALIFICATION_IMAGE=%s\n' "$qualification_image" >> "$GITHUB_ENV"
+          docker --context default run --rm --entrypoint /usr/bin/sha256sum "$qualification_image" /usr/bin/python3 > "$QUALIFICATION_ROOT/config/node-python.sha256"
+          docker --context default run --rm --entrypoint /usr/bin/python3 \
+            --mount "type=bind,source=$PWD,target=/provider,readonly" \
+            "$qualification_image" -I /provider/tests/qualification/kill_bootstrap.py > "$QUALIFICATION_ROOT/work/evidence/node-python.json"
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          evidence = json.loads((Path(os.environ["QUALIFICATION_ROOT"]) / "work/evidence/node-python.json").read_text())
+          assert evidence["native_pidfd"] is True
+          expected = (Path(os.environ["QUALIFICATION_ROOT"]) / "config/node-python.sha256").read_text().split()[0]
+          assert evidence["interpreter_sha256"] == expected
+          PY
+      - name: Build ordinary core, provider, and application wheels
         run: |
-          docker compose -f docker/docker-compose.yml config --format json | python -c 'import json, os, sys; mounts = json.load(sys.stdin)["services"]["slurm"]["volumes"]; assert any(mount.get("source") == os.environ["ARTISAN_WORKTREE"] and mount["target"] == "/workspace/artisan" for mount in mounts)'
-      - name: Build cluster
-        run: pixi run --locked slurm-build
-      - name: Start cluster
-        run: pixi run --locked slurm-up
-      - name: Install locked environment
-        run: pixi run --locked slurm-install
-      - name: Verify container source pair
-        run: docker compose -f docker/docker-compose.yml exec -T -u docker slurm pixi run --locked -e dev python scripts/verify_sources.py /workspace/artisan /workspace/artisan-submitit "$ARTISAN_CORE_REF"
-      - name: Test sbatch runner
-        run: pixi run --locked slurm-test-sbatch
-      - name: Test srun runner
-        run: pixi run --locked slurm-test-srun
-      - name: Install locked tutorial environment
-        run: docker compose -f docker/docker-compose.yml exec -T -u docker slurm /usr/local/bin/pixi install --locked -e tutorials
-      - name: Execute sbatch tutorials
-        run: docker compose -f docker/docker-compose.yml exec -T -u docker -e ARTISAN_SLURM_PARTITION=debug slurm env -u PYTHONPATH /usr/local/bin/pixi run --locked -e tutorials test-tutorial-sbatch
-      - name: Execute srun tutorial
-        run: docker compose -f docker/docker-compose.yml exec -T -u docker -e ARTISAN_SLURM_PARTITION=debug slurm env -u PYTHONPATH /usr/local/bin/pixi run --locked -e tutorials test-tutorial-srun
-      - name: Retain executed tutorials
+          set -euo pipefail
+          ~/.pixi/bin/pixi run --locked -e dev python -m build --wheel --outdir "$QUALIFICATION_ROOT/work/profile/wheels" ../artisan
+          ~/.pixi/bin/pixi run --locked -e dev python -m build --wheel --outdir "$QUALIFICATION_ROOT/work/profile/wheels" .
+          ~/.pixi/bin/pixi run --locked -e dev python -m build --wheel --outdir "$QUALIFICATION_ROOT/work/profile/wheels" tests/qualification/application
+      - name: Define installed profile and isolated scheduler account
+        run: |
+          set -euo pipefail
+          docker --context default run --rm --entrypoint /bin/cat "$QUALIFICATION_IMAGE" /etc/passwd > "$QUALIFICATION_ROOT/config/passwd"
+          docker --context default run --rm --entrypoint /bin/cat "$QUALIFICATION_IMAGE" /etc/group > "$QUALIFICATION_ROOT/config/group"
+          docker --context default run --rm --entrypoint /usr/sbin/slurmd "$QUALIFICATION_IMAGE" -C > "$QUALIFICATION_ROOT/config/node.txt"
+          ~/.pixi/bin/pixi run --locked -e dev python - <<'PY'
+          import json, os, sys, tomllib
+          from pathlib import Path
+          from packaging.requirements import Requirement
+          from packaging.utils import canonicalize_name, parse_wheel_filename
+          from tests.qualification.prepare_profile import _versions
+          root = Path(os.environ["QUALIFICATION_ROOT"])
+          wheels = sorted((root / "work/profile/wheels").glob("*.whl"))
+          assert {str(parse_wheel_filename(wheel.name)[0]) for wheel in wheels} == {"dexterity-artisan", "artisan-submitit", "slurm-qualification-app"}
+          documents = [tomllib.loads((source / "pyproject.toml").read_text())["project"] for source in (Path("../artisan"), Path.cwd(), Path("tests/qualification/application"))]
+          local = {canonicalize_name(document["name"]): document["version"] for document in documents}
+          runtime = _versions((Requirement(value) for document in documents for value in document["dependencies"]), local)
+          checks = _versions((Requirement("pytest"), Requirement("pytest-timeout")), local)
+          assert not set(runtime) & set(local)
+          lines = [
+              '[workspace]', 'name = "artisan-slurm-ci"', 'channels = ["conda-forge"]',
+              'platforms = ["linux-64"]', 'requires-pixi = "==0.83.0"',
+              '[environments]',
+              'controller = { features = ["runtime", "checks"], no-default-feature = true, solve-group = "runtime" }',
+              'worker = { features = ["runtime"], no-default-feature = true, solve-group = "runtime" }',
+              '[feature.runtime.dependencies]',
+              f'python = "=={sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"',
+              '[feature.runtime.pypi-dependencies]',
+          ]
+          lines.extend(f'{json.dumps(str(parse_wheel_filename(wheel.name)[0]))} = {{ path = {json.dumps("wheels/" + wheel.name)} }}' for wheel in wheels)
+          lines.extend(f'{json.dumps(name)} = "=={version}"' for name, version in sorted(runtime.items()))
+          lines += ['[feature.checks.pypi-dependencies]']
+          lines.extend(f'{json.dumps(name)} = "=={version}"' for name, version in sorted(checks.items()) if name not in runtime)
+          lines += ['nbclient = ">=0.10,<1"', 'nbformat = ">=5,<6"', 'ipykernel = ">=6,<8"']
+          (root / "work/profile/pixi.toml").write_text("\n".join(lines) + "\n")
+          for filename, identity in (("passwd", os.getuid()), ("group", os.getgid())):
+              destination = root / "config" / filename
+              records = [line.split(":") for line in destination.read_text().splitlines()]
+              assert not any(record[0] != "docker" and int(record[2]) == identity for record in records)
+              selected = [record for record in records if record[0] == "docker"]
+              assert len(selected) == 1
+              record = selected[0]
+              record[0], record[2] = "qualification", str(identity)
+              if filename == "passwd":
+                  record[3], record[5] = str(os.getgid()), "/home/qualification"
+              destination.write_text("\n".join(":".join(record) for record in records) + "\n")
+              destination.chmod(0o644)
+          PY
+          cp docker/qualification-slurm.conf docker/qualification-slurmdbd.conf "$QUALIFICATION_ROOT/config/"
+          mv "$QUALIFICATION_ROOT/config/qualification-slurm.conf" "$QUALIFICATION_ROOT/config/slurm.conf"
+          mv "$QUALIFICATION_ROOT/config/qualification-slurmdbd.conf" "$QUALIFICATION_ROOT/config/slurmdbd.conf"
+          python - <<'PYTHON'
+          import os
+          from pathlib import Path
+          root = Path(os.environ["QUALIFICATION_ROOT"]) / "config"
+          record = next(line for line in (root / "node.txt").read_text().splitlines() if line.startswith("NodeName="))
+          fields = dict(field.split("=", 1) for field in record.split() if "=" in field)
+          assert int(fields["CPUs"]) >= 4 and int(fields["RealMemory"]) >= 6144
+          topology = " ".join(f"{key}={fields[key]}" for key in ("CPUs", "Boards", "SocketsPerBoard", "CoresPerSocket", "ThreadsPerCore"))
+          config = root / "slurm.conf"
+          config.write_text("\n".join(f"NodeName=artisan-scheduler-qualification {topology} RealMemory=6144 State=UNKNOWN" if line.startswith("NodeName=") else line for line in config.read_text().splitlines()) + "\n")
+          PYTHON
+          python - <<'PYTHON'
+          import hashlib, json, os
+          from pathlib import Path
+          config = Path(os.environ["QUALIFICATION_ROOT"]) / "config"
+          receipt = {
+              "schema_version": 1,
+              "image_id": (config / "image-id").read_text().strip(),
+              "user": "qualification", "uid": os.getuid(), "gid": os.getgid(),
+              "node_python_sha256": (config / "node-python.sha256").read_text().split()[0],
+              "slurm_conf_sha256": hashlib.sha256((config / "slurm.conf").read_bytes()).hexdigest(),
+              "slurmdbd_conf_sha256": hashlib.sha256((config / "slurmdbd.conf").read_bytes()).hexdigest(),
+          }
+          body = (json.dumps(receipt, sort_keys=True, indent=2) + "\n").encode()
+          (config / "fixture.json").write_bytes(body)
+          with Path(os.environ["GITHUB_ENV"]).open("a") as stream:
+              stream.write(f"QUALIFICATION_FIXTURE_SHA256={hashlib.sha256(body).hexdigest()}\n")
+          PYTHON
+          printf 'QUALIFICATION_UID=%s\nQUALIFICATION_GID=%s\n' "$(id -u)" "$(id -g)" >> "$GITHUB_ENV"
+      - name: Create isolated scheduler
+        run: |
+          set -euo pipefail
+          existing=$(docker --context default container ls --all --no-trunc --filter "name=^/${QUALIFICATION_CONTAINER}$" --format '{{.ID}}')
+          test -z "$existing"
+          docker --context default compose -p "$QUALIFICATION_CONTAINER" -f docker/qualification-compose.yml create --no-build --pull never
+          qualification_container_id=$(docker --context default container inspect "$QUALIFICATION_CONTAINER" --format '{{.Id}}')
+          [[ "$qualification_container_id" =~ ^[a-f0-9]{64}$ ]]
+          printf 'QUALIFICATION_CONTAINER_ID=%s\n' "$qualification_container_id" >> "$GITHUB_ENV"
+      - name: Start isolated scheduler
+        run: |
+          set -euo pipefail
+          observed=$(docker --context default container inspect "$QUALIFICATION_CONTAINER" --format '{{.Id}}')
+          test "$observed" = "$QUALIFICATION_CONTAINER_ID"
+          docker --context default compose -p "$QUALIFICATION_CONTAINER" -f docker/qualification-compose.yml up --no-recreate --no-build --pull never --wait --wait-timeout 180
+      - name: Install the declared controller and worker profiles
+        run: |
+          set -euo pipefail
+          /usr/bin/python3 tests/qualification/fixture_identity.py \
+            env HOME=/home/qualification PIXI_CACHE_DIR=/qualification/cache/pixi UV_CACHE_DIR=/qualification/cache/uv \
+            /usr/local/bin/pixi lock --no-config --manifest-path /qualification/profile/pixi.toml
+          for selected in controller worker; do
+            /usr/bin/python3 tests/qualification/fixture_identity.py \
+              env HOME=/home/qualification PIXI_CACHE_DIR=/qualification/cache/pixi UV_CACHE_DIR=/qualification/cache/uv \
+              /usr/local/bin/pixi install --locked --no-config --manifest-path /qualification/profile/pixi.toml -e "$selected"
+          done
+      - name: Prepare actual installed targets before scheduling science
+        run: |
+          set -euo pipefail
+          mkdir "$QUALIFICATION_ROOT/work/evidence/preparation"
+          /usr/bin/python3 tests/qualification/fixture_identity.py \
+            env HOME=/home/qualification /bin/sh -eu -c 'mkdir -p "$HOME/.pixi/bin"; ln -s /usr/local/bin/pixi "$HOME/.pixi/bin/pixi"; test "$(readlink -f "$HOME/.pixi/bin/pixi")" = /usr/local/bin/pixi'
+          /usr/bin/python3 tests/qualification/fixture_identity.py \
+            env HOME=/home/qualification PIXI_CACHE_DIR=/qualification/cache/pixi UV_CACHE_DIR=/qualification/cache/uv \
+            /qualification/profile/.pixi/envs/controller/bin/python -I /provider/tests/qualification/prepare_targets.py \
+            --profile /qualification/profile --control-root /qualification/evidence/preparation --pixi /usr/local/bin/pixi --partition debug
+      - name: Qualify sbatch pipeline and per-unit cancellation
+        run: |
+          set -euo pipefail
+          for scenario in pipeline unit-cancellation; do
+            timeout --signal=TERM --kill-after=30s 600s /usr/bin/python3 tests/qualification/fixture_identity.py \
+              /qualification/profile/.pixi/envs/controller/bin/python -I /provider/tests/qualification/run_installed.py \
+              --profile /qualification/profile --root "/qualification/evidence/sbatch-$scenario" --mode sbatch --partition debug --scenario "$scenario"
+          done
+      - name: Qualify intra-allocation pipeline and per-unit cancellation
+        run: |
+          set -euo pipefail
+          for scenario in pipeline unit-cancellation; do
+            timeout --signal=TERM --kill-after=30s 600s /usr/bin/python3 tests/qualification/fixture_identity.py \
+              /usr/bin/salloc --partition debug --nodes=1 --ntasks=1 --cpus-per-task=4 --mem=6G --time=00:10:00 \
+              /bin/bash /provider/docker/qualification-allocation.sh \
+              /qualification/profile/.pixi/envs/controller/bin/python -I /provider/tests/qualification/run_installed.py \
+              --profile /qualification/profile --root "/qualification/evidence/srun-$scenario" --mode srun --partition debug --scenario "$scenario"
+          done
+      - name: Qualify queued cancellation, unknown ownership, and requeue
+        run: |
+          set -euo pipefail
+          for scenario in queued native requeue; do
+            timeout --signal=TERM --kill-after=30s 360s /usr/bin/python3 tests/qualification/fixture_identity.py \
+              /qualification/profile/.pixi/envs/controller/bin/python -I /provider/tests/qualification/run_faults.py \
+              --profile /qualification/profile --root "/qualification/evidence/fault-$scenario" --partition debug --scenario "$scenario"
+          done
+      - name: Execute tutorials with installed software
+        run: |
+          set -euo pipefail
+          checks=(/qualification/profile/.pixi/envs/controller/bin/python -I -m pytest -p no:cacheprovider --run-slurm /provider/tests/integration/test_tutorials.py)
+          shared=(env PATH=/qualification/profile/.pixi/envs/controller/bin:/usr/local/bin:/usr/bin:/bin HOME=/home/qualification ARTISAN_SLURM_MANIFEST=/qualification/profile/pixi.toml ARTISAN_SLURM_CACHE=/qualification/profile/prepared ARTISAN_SLURM_ENVIRONMENT=worker ARTISAN_SLURM_PIXI=/usr/local/bin/pixi ARTISAN_SLURM_PARTITION=debug ARTISAN_TUTORIAL_ROOT=/qualification/evidence/tutorials/runs)
+          timeout --signal=TERM --kill-after=30s 600s /usr/bin/python3 tests/qualification/fixture_identity.py "${shared[@]}" "${checks[@]}" -k sbatch --junitxml=/qualification/evidence/tutorials/sbatch.xml
+          timeout --signal=TERM --kill-after=30s 600s /usr/bin/python3 tests/qualification/fixture_identity.py "${shared[@]}" \
+            /usr/bin/salloc --partition debug --nodes=1 --ntasks=1 --cpus-per-task=4 --mem=6G --time=00:10:00 \
+            /bin/bash /provider/docker/qualification-allocation.sh "${checks[@]}" -k srun --junitxml=/qualification/evidence/tutorials/srun.xml
+      - name: Retain qualification reports and lock
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: executed-tutorials
-          path: artisan-submitit/slurm_logs/tutorials/**/*.ipynb
-      - name: Stop cluster
+          name: slurm-installed-qualification
+          path: |
+            ${{ runner.temp }}/artisan-slurm-qualification/work/evidence/**
+            ${{ runner.temp }}/artisan-slurm-qualification/config/fixture.json
+            ${{ runner.temp }}/artisan-slurm-qualification/config/slurm.conf
+            ${{ runner.temp }}/artisan-slurm-qualification/work/profile/pixi.toml
+            ${{ runner.temp }}/artisan-slurm-qualification/work/profile/pixi.lock
+      - name: Stop isolated scheduler
         if: always()
-        run: pixi run --locked slurm-down
+        run: |
+          set -euo pipefail
+          if [[ -z "${QUALIFICATION_CONTAINER_ID:-}" ]]; then
+            exit 0
+          fi
+          observed=$(docker --context default container ls --all --no-trunc --filter "name=^/${QUALIFICATION_CONTAINER}$" --format '{{.ID}}')
+          if [[ -n "$observed" && "$observed" != "$QUALIFICATION_CONTAINER_ID" ]]; then
+            echo "Refusing to stop a replacement qualification container" >&2
+            exit 1
+          fi
+          docker --context default compose -p "$QUALIFICATION_CONTAINER" -f docker/qualification-compose.yml down --volumes

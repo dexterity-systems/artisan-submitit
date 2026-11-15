@@ -24,7 +24,8 @@ classifiers = [
 dependencies = [
     "cloudpickle>=3,<4",
     "dexterity-artisan>=0.2.0.dev0",
-    "submitit>=1.5,<2",
+    "submitit==1.5.4",
+    "pydantic>=2.12,<3",
 ]
 
 [project.urls]
@@ -83,8 +84,8 @@ test = "pytest tests/ --ignore=tests/integration"
 test-unit = "pytest tests/ --ignore=tests/integration"
 test-sbatch = { cmd = "pytest -p no:cacheprovider --run-slurm tests/integration/test_slurm.py", env = { PYTHONPATH = ".", SLURM_TEST_PARTITION = "cpu" } }
 test-sbatch-docker = { cmd = "pytest -p no:cacheprovider --run-slurm tests/integration/test_slurm.py", env = { PYTHONPATH = ".", SLURM_TEST_PARTITION = "debug" } }
-test-srun = { cmd = "salloc -n4 --mem=4G -- bash -c 'python -m pytest -p no:cacheprovider --run-slurm tests/integration/test_srun.py'", env = { PYTHONPATH = ".", SLURM_TEST_PARTITION = "cpu" } }
-test-srun-docker = { cmd = "salloc -p debug -n4 --mem=4G -- bash -c 'python -m pytest -p no:cacheprovider --run-slurm tests/integration/test_srun.py'", env = { PYTHONPATH = ".", SLURM_TEST_PARTITION = "debug" } }
+test-srun = { cmd = "salloc --nodes=1 --ntasks=1 --cpus-per-task=4 --mem=6G -- bash -c 'python -m pytest -p no:cacheprovider --run-slurm tests/integration/test_srun.py'", env = { PYTHONPATH = ".", SLURM_TEST_PARTITION = "cpu" } }
+test-srun-docker = { cmd = "salloc -p debug --nodes=1 --ntasks=1 --cpus-per-task=4 --mem=6G -- bash -c 'python -m pytest -p no:cacheprovider --run-slurm tests/integration/test_srun.py'", env = { PYTHONPATH = ".", SLURM_TEST_PARTITION = "debug" } }
 build-dist = "rm -rf dist/ && python -m build"
 check-dist = "python -m twine check dist/*"
 smoke-dist = "python scripts/smoke_distribution.py"
@@ -98,7 +99,7 @@ docs-serve = { cmd = "python -m http.server -d _build/html 8000", cwd = "docs" }
 tutorials = "jupyter lab docs/tutorials"
 test-tutorial-sbatch = "python -m pytest -p no:cacheprovider --run-slurm tests/integration/test_tutorials.py -k sbatch"
 test-tutorial-srun = { cmd = """bash -c '
-allocation=(--partition "${ARTISAN_SLURM_PARTITION:-cpu}" --ntasks=2 --mem=4G --time=00:15:00)
+allocation=(--partition "${ARTISAN_SLURM_PARTITION:-cpu}" --nodes=1 --ntasks=1 --cpus-per-task=2 --mem=4G --time=00:15:00)
 if [[ -n "${ARTISAN_SLURM_ACCOUNT:-}" ]]; then
     allocation+=(--account "$ARTISAN_SLURM_ACCOUNT")
 fi
@@ -161,7 +162,6 @@ ignore = ["PLR09", "PLR2004"]
 isort.required-imports = ["from __future__ import annotations"]
 
 [tool.ruff.lint.per-file-ignores]
-"src/artisan_submitit/srun_worker.py" = ["T20"]
 "examples/**" = ["T201"]
 "scripts/smoke_distribution.py" = ["PLC0415"]
 "docs/tutorials/*.ipynb" = ["T201"]

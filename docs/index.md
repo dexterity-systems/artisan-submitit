@@ -7,8 +7,7 @@ this package transports execution units through `sbatch` or `srun`.
 - [Tutorials](tutorials/index.md) run complete pipelines using Artisan's built-in
   operations, with notebooks for queue submission, existing allocations, and
   batching managed commands.
-- [Queue-based execution](slurm.md) configures `SlurmRunner` for Submitit job
-  arrays.
+- [Queue-based execution](slurm.md) configures `SlurmRunner` for one Submitit job per worker pack.
 - [Intra-allocation execution](srun.md) configures `SlurmIntraRunner` inside an
   existing allocation.
 - [Migration](migration.md) covers moving from Artisan's former built-in SLURM

@@ -31,13 +31,11 @@ The UID/GID variables let the container's unprivileged `docker` user write
 generated editable-install metadata and pytest state without changing bind-
 mounted repository ownership.
 
-Inside the container, install both editable projects and run the tests:
+Inside the container, install both editable projects for development:
 
 ```bash
 pixi install --locked -e dev
 pixi run --locked -e dev python scripts/verify_sources.py /workspace/artisan /workspace/artisan-submitit main
-pixi run --locked -e dev test-sbatch-docker
-pixi run --locked -e dev test-srun-docker
 ```
 
 The Compose environment mounts:
@@ -59,11 +57,20 @@ uses a detached environment volume at `/pixi-env`. Keep a unique Compose project
 name and volume for each checkout, and never share this installed environment
 with another worktree. Package caches may be shared.
 
-For release qualification, record both Git revisions, imported module paths,
-the `debug` partition/allocation, and each suite's pass/fail/skip counts. The
-source verification command resolves the requested branch or commit, prints the
-revisions, and rejects a different core or imports outside the mounted source
-trees. Use independent clones to keep your development checkouts unchanged.
+For scheduler qualification, use the [SLURM Docker workflow](../.github/workflows/slurm-docker.yaml)
+with the `test-slurm` pull-request label or manual dispatch. It builds ordinary
+core, provider and application wheels, locks an explicit controller/worker profile,
+and prepares the targets before running the CPU pipeline, cancellation, ownership
+and tutorial checks. Its fixture receipt binds the immutable image, qualification
+account, node interpreter and scheduler configuration. Every controller launch
+checks that receipt independently. The generated manifest, lock and reports are
+retained as workflow artifacts.
+
+The qualification fixture mounts its receipt and configuration read-only and uses
+a separate writable job directory. It does not mount host home directories or
+package caches. The development Compose file above remains useful for source
+inspection and editing; its editable environment alone does not supply the
+installed profile required by the integration tests.
 
 If your account already has noninteractive sudo access to Docker, invoke Compose
 through `sudo -n env ARTISAN_WORKTREE=... ARTISAN_DOCKER_UID=... ARTISAN_DOCKER_GID=...
@@ -74,23 +81,13 @@ qualification cluster and its environment volume are removed.
 
 ## Execute the tutorials
 
-The [tutorial notebooks](../docs/tutorials/index.md) run against this cluster
-with the same built-in Artisan operations used on a real site. Inside the
-container, install the notebook environment and select the test partition:
-
-```bash
-/usr/local/bin/pixi install --locked -e tutorials
-export ARTISAN_SLURM_PARTITION=debug
-export ARTISAN_TUTORIAL_ROOT=/workspace/artisan-submitit/tutorial-runs
-/usr/local/bin/pixi run --locked -e tutorials test-tutorial-sbatch
-/usr/local/bin/pixi run --locked -e tutorials test-tutorial-srun
-```
-
-The first task executes the queue and batching notebooks. The second creates an
-allocation and executes the allocation notebook inside it. Each test uses a
-separate directory beneath the shared tutorial root. Executed notebook copies,
-including outputs from failed cells, are retained under `slurm_logs/tutorials/`.
-The source notebooks keep their outputs empty.
+The [tutorial notebooks](../docs/tutorials/index.md) run in the installed
+controller profile declared by the qualification workflow. Notebook dependencies
+are included before the profile is locked and verified. The workflow supplies
+`ARTISAN_SLURM_MANIFEST`, `ARTISAN_SLURM_CACHE`, `ARTISAN_SLURM_ENVIRONMENT`,
+`ARTISAN_SLURM_PIXI`, and the test partition, and runs the allocation notebook
+inside a separately owned allocation. Executed notebook copies and JUnit reports
+are retained with the other qualification evidence.
 
 ## Useful commands
 
