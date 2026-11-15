@@ -11,6 +11,7 @@ from artisan.orchestration.runner_api import (
     LocalRunner,
     PreparedLocalBindings,
     RunnerResources,
+    merge_runner_resources,
 )
 
 from artisan_submitit.runner import _validate_parameters
@@ -84,3 +85,44 @@ def test_capture_rejects_application_mismatch_before_serialization(
             tmp_path,
         )
     serialize.assert_not_called()
+
+
+@pytest.mark.parametrize("curator", [False, True])
+@pytest.mark.parametrize("override", [None, RunnerResources(memory_gb=96)])
+def test_preparation_keeps_authored_defaults_without_login_node_gpu_selection(
+    monkeypatch: pytest.MonkeyPatch,
+    curator: bool,
+    override: RunnerResources | None,
+) -> None:
+    method = "prepare_curator" if curator else "prepare"
+    prepare = Mock()
+    monkeypatch.setattr(LocalRunner, method, prepare)
+    subject = Mock()
+    before = None if override is None else override.model_dump()
+    getattr(_runner(), method)(
+        subject,
+        runner_resources=override,
+        application_modules=("example_application",),
+    )
+    defaults = RunnerResources(
+        cpus=8,
+        memory_gb=64,
+        gpus=2,
+        time_limit="02:00:00",
+        extra={"slurm_partition": "gpu"},
+    )
+    effective = merge_runner_resources(
+        defaults, prepare.call_args.kwargs["runner_resources"]
+    )
+    assert effective == RunnerResources(
+        cpus=8,
+        memory_gb=64 if override is None else 96,
+        gpus=0,
+        time_limit="02:00:00",
+        extra={},
+    )
+    assert prepare.call_args.args == (subject,)
+    assert prepare.call_args.kwargs["application_modules"] == ("example_application",)
+    assert (None if override is None else override.model_dump()) == before
+    assert defaults.gpus == 2
+    assert defaults.extra == {"slurm_partition": "gpu"}

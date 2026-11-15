@@ -99,7 +99,7 @@ class SchedulerRunner(LocalRunner):
         application_modules: tuple[str, ...] = (),
     ) -> None:
         resources = _local_resources(
-            runner_resources or RunnerResources(cpus=1, memory_gb=4, gpus=0)
+            runner_resources or RunnerResources.model_validate({})
         )
         super().prepare(
             definition,
@@ -118,7 +118,7 @@ class SchedulerRunner(LocalRunner):
         super().prepare_curator(
             operation,
             runner_resources=_local_resources(
-                runner_resources or RunnerResources(cpus=1, memory_gb=4, gpus=0)
+                runner_resources or RunnerResources.model_validate({})
             ),
             application_modules=application_modules,
         )
