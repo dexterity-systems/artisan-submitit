@@ -13,10 +13,19 @@ This release has no old-store conversion or compatibility runner aliases.
 | `slurm_gres` overriding GPU counts | Typed `gpus` plus current scheduled GPU measurement |
 | Worker log fields on execution rows | Public failure/log and command inspection readers |
 
+Prepared environment records now identify declared software and completed
+preparation rather than an inventory of all installed files. Prepare existing
+environments once with the matching new core/provider versions; old prepared
+records are not reused. This change does not require another fresh store if you
+already use the retained store format. Operations and pipelines share the new
+prepared targets, and normal execution does not audit arbitrary in-place edits
+to installed packages.
+
 Operations and composites share `pipeline.run(operation, ...)` and
-`pipeline.submit(operation, ...)`. Top-level curators run in the selected worker;
-prepare their actual instance with `prepare_curator`. Preserve trusted explicit
-application registration modules through preparation and pipeline creation.
+`pipeline.submit(operation, ...)`. Top-level curators run in the selected worker.
+When preparing through a curator, pass its actual instance to `prepare_curator`.
+Preserve trusted explicit application registration modules through preparation
+and pipeline creation.
 
 Resuming requires the configured provider instance. Stored names do not authorize
 imports or reconstruct scheduler settings. The run appends new steps and keeps

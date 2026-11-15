@@ -33,7 +33,6 @@ runner = SlurmRunner(
 
 # Explicit preparation may install software. Pipeline submission only looks it up.
 runner.prepare(DataGenerator)
-runner.prepare(DataTransformer)
 with PipelineManager.create(
     "example",
     str(root / "delta"),
@@ -58,9 +57,18 @@ with PipelineManager.create(
     assert transformed.succeeded_count == 4
 ```
 
+The prepared worker is shared by both operations. Keep the prepared cache to
+reuse it across pipelines and runner instances; no per-operation installation
+or repeated preparation is needed when its packages and tool environments are
+already covered. Change the environment definition and prepare again to change
+software. Installed environments are managed targets: normal execution checks
+availability and compatibility without hashing every installed file. Do not
+modify installed packages in place.
+
 Replace the example paths and account with your site settings. Application
-definitions must come from installed importable packages. Prepare curators with
-`runner.prepare_curator(operation_instance)`. Pass the same explicit
+definitions must come from installed importable packages. For a curator,
+`runner.prepare_curator(operation_instance)` provides the same preparation path.
+Pass the same explicit
 `application_modules` to preparation and pipeline creation when your application
 registers artifact types.
 

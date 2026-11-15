@@ -10,11 +10,15 @@ from types import SimpleNamespace
 from typing import cast
 
 import pytest
-from artisan.orchestration.runner_api import LocalWorkerProfile
+from artisan.orchestration.runner_api import LocalWorkerProfile, PreparedLocalBindings
 
 from artisan_submitit import bootstrap
 from artisan_submitit.control import PackRequest, ReadyRecord, write_once
-from artisan_submitit.software import SchedulerSoftware, verify_submitit_plugins
+from artisan_submitit.software import (
+    SchedulerSoftware,
+    SlurmSoftware,
+    verify_submitit_plugins,
+)
 
 
 def _request() -> PackRequest:
@@ -217,45 +221,65 @@ def test_srun_affinity_and_logging_arguments_remain_literal() -> None:
     assert validate_srun_arguments(arguments) == tuple(arguments)
 
 
-def test_bootstrap_is_the_selected_installed_file(tmp_path: Path) -> None:
+@pytest.fixture
+def prepared_software(tmp_path: Path) -> SlurmSoftware:
     from unittest.mock import Mock
 
     from artisan.orchestration.runner_api import PreparedNativeEnvironment
 
-    from artisan_submitit.software import SlurmSoftware
-
     worker = Mock(spec=PreparedNativeEnvironment)
     worker.prefix = tmp_path / "worker"
-    worker.files = (
-        SimpleNamespace(
-            path="lib/python3.12/site-packages/artisan_submitit/bootstrap.py",
-            sha256="a" * 64,
-            link=None,
-        ),
+    script = (
+        worker.prefix / "lib/python3.12/site-packages/artisan_submitit/bootstrap.py"
     )
+    script.parent.mkdir(parents=True)
+    script.write_text("# installed provider bootstrap\n")
     local = SimpleNamespace(
         worker_is_observed=False,
         native_gpu=None,
         worker=worker,
         compatibility=SimpleNamespace(
-            packages=(
-                SimpleNamespace(
-                    name="artisan-submitit",
-                    files=(
-                        SimpleNamespace(
-                            path="artisan_submitit/bootstrap.py",
-                            sha256="a" * 64,
-                        ),
-                    ),
-                ),
-            )
+            python_version="3.12.12",
+            packages=(SimpleNamespace(name="artisan-submitit"),),
         ),
     )
-    software = SlurmSoftware(local, Mock(), "{}")
-    assert software.bootstrap_script == worker.prefix / worker.files[0].path
-    worker.files[0].sha256 = "b" * 64
-    with pytest.raises(ValueError, match="exact installed"):
-        _ = software.bootstrap_script
+    return SlurmSoftware(cast(PreparedLocalBindings, local), Mock(), "{}")
+
+
+def test_bootstrap_reuses_installed_path_without_reading_payload(
+    prepared_software: SlurmSoftware, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    script = (
+        prepared_software.local.worker.prefix
+        / "lib/python3.12/site-packages/artisan_submitit/bootstrap.py"
+    )
+    script.write_text("# manual installed-file edits are not audited\n")
+    monkeypatch.setattr(
+        Path, "open", lambda *_args, **_kwargs: pytest.fail("Installed payload read")
+    )
+    assert prepared_software.bootstrap_script == script
+
+
+def test_bootstrap_requires_provider_package_metadata(
+    prepared_software: SlurmSoftware,
+) -> None:
+    cast(SimpleNamespace, prepared_software.local.compatibility).packages = ()
+    with pytest.raises(ValueError, match="provider package"):
+        _ = prepared_software.bootstrap_script
+
+
+@pytest.mark.parametrize("replacement", ["missing", "outside"])
+def test_bootstrap_requires_an_available_in_prefix_file(
+    prepared_software: SlurmSoftware, tmp_path: Path, replacement: str
+) -> None:
+    script = prepared_software.bootstrap_script
+    script.unlink()
+    if replacement == "outside":
+        outside = tmp_path / "outside.py"
+        outside.write_text("# outside prepared installation\n")
+        script.symlink_to(outside)
+    with pytest.raises(ValueError, match="in-prefix provider bootstrap"):
+        _ = prepared_software.bootstrap_script
 
 
 def test_replacing_both_outer_payload_and_adjacent_receipt_still_rejects(

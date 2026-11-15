@@ -199,29 +199,28 @@ class SlurmSoftware(PreparedAssignmentSoftware, PreparedCuratorSoftware):
 
     @property
     def bootstrap_script(self) -> Path:
-        """Select the measured installed provider file from the worker inventory."""
-        logical = "artisan_submitit/bootstrap.py"
-        provider = next(
-            package
-            for package in self.compatibility.packages
-            if package.name == "artisan-submitit"
-        )
-        expected = next(item for item in provider.files if item.path == logical)
+        """Locate the installed provider bootstrap inside the prepared worker."""
         worker = self.local.worker
         if not isinstance(worker, PreparedNativeEnvironment):
             msg = "Scheduler bootstrap requires a prepared worker"
             raise ValueError(msg)
-        matches = [
-            item
-            for item in worker.files
-            if item.path.endswith("/site-packages/" + logical)
-            and item.sha256 == expected.sha256
-            and item.link is None
-        ]
-        if len(matches) != 1:
-            msg = "Prepared worker lacks the exact installed provider bootstrap"
+        if not any(
+            package.name == "artisan-submitit"
+            for package in self.compatibility.packages
+        ):
+            msg = "Prepared worker lacks the provider package"
             raise ValueError(msg)
-        return self.local.worker.prefix / matches[0].path
+        major, minor, *_ = self.compatibility.python_version.split(".")
+        path = (
+            worker.prefix
+            / "lib"
+            / f"python{major}.{minor}"
+            / "site-packages/artisan_submitit/bootstrap.py"
+        )
+        if not path.is_file() or not path.resolve().is_relative_to(worker.prefix):
+            msg = "Prepared worker lacks an in-prefix provider bootstrap"
+            raise ValueError(msg)
+        return path
 
     @property
     def resources(self) -> RunnerResources:
@@ -253,7 +252,7 @@ class SlurmSoftware(PreparedAssignmentSoftware, PreparedCuratorSoftware):
         return self.local.compatibility
 
     def verify_controller(self, plan: CompiledPlan | None = None) -> None:
-        """Validate software bytes without inspecting controller GPU allocation."""
+        """Check prepared targets and scheduler identity without controller GPU probes."""
         self.scheduler.verify()
         if plan is None:
             self.local.verify_worker()

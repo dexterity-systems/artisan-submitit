@@ -22,7 +22,7 @@ from pathlib import Path
 
 from artisan.orchestration.runner_api import (
     PreparedNativeEnvironment,
-    verify_native_payload,
+    verify_native_environment,
     verify_wheel_installation,
 )
 from packaging.requirements import Requirement
@@ -189,7 +189,7 @@ def prepare(args: argparse.Namespace) -> dict[str, object]:
     builder = PreparedNativeEnvironment.model_validate_json(
         args.builder_binding.read_bytes()
     )
-    verify_native_payload(builder)
+    verify_native_environment(builder)
     builder_python = builder.prefix / "bin/python"
     destination = args.destination.resolve()
     destination.mkdir(parents=True, exist_ok=False)
@@ -248,7 +248,7 @@ def prepare(args: argparse.Namespace) -> dict[str, object]:
     if before != {str(root): _inventory(root) for root in roots}:
         msg = "Package source changed during ordinary-wheel construction"
         raise ValueError(msg)
-    verify_native_payload(builder)
+    verify_native_environment(builder)
     built = tuple(sorted(wheels.glob("*.whl")))
     if len(built) != 3 or {
         canonicalize_name(path.name.split("-")[0]) for path in built

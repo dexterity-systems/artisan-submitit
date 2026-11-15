@@ -608,11 +608,11 @@ def sif(tmp_path: Path) -> SIFProbeSpec:
                     "platform": "linux-64",
                     "workspace": "/opt/artisan/environment",
                     "prefix": "/opt/artisan/environment/.pixi/envs/tool",
-                    "files": [{"path": "bin/python", "sha256": "8" * 64}],
                 },
             },
         }
     )
+    (image.parent / "binding.json").write_text(target.model_dump_json())
     return SIFProbeSpec(runtime=runtime, launcher=launcher, targets=(target,))
 
 
@@ -699,6 +699,30 @@ def test_sif_measurement_checks_launcher_image_and_selected_gpu_payload(
     assert seen == [None, allocation.devices]
     verify.assert_called_once_with(sif.targets[0], apptainer=sif.runtime)
     assert sif.runtime.gpu_devices is None
+
+
+def test_sif_probe_reuses_prepared_target_without_reading_image_bytes(
+    monkeypatch: pytest.MonkeyPatch,
+    allocation: NativeGPUAllocation,
+    sif: SIFProbeSpec,
+    gpu_launcher: ContainerLauncherIdentity,
+) -> None:
+    image = sif.targets[0].sif
+    image.write_bytes(b"installed image bytes are not audited")
+    _mock_sif_host(monkeypatch, sif, gpu_launcher)
+    original = Path.read_bytes
+
+    def read_metadata(path: Path) -> bytes:
+        if path == image:
+            pytest.fail("Prepared image payload was read")
+        return original(path)
+
+    monkeypatch.setattr(Path, "read_bytes", read_metadata)
+    monkeypatch.setattr(
+        "artisan.execution.environments.prepared_sif.file_digest",
+        Mock(side_effect=AssertionError("Prepared image payload was hashed")),
+    )
+    assert sif.verify(allocation, expected=gpu_launcher) == gpu_launcher
 
 
 def test_sif_launcher_drift_rejects_before_image_access(
@@ -806,7 +830,7 @@ def test_sif_gpu_digest_binds_selected_payloads_without_allocation(
     assert local.container_runtime.gpu_devices is None
 
 
-@pytest.mark.parametrize("drift", ["image", "selected_payload"])
+@pytest.mark.parametrize("drift", ["missing_image", "selected_payload"])
 def test_sif_entry_drift_prevents_scientific_payload_loading(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -818,9 +842,9 @@ def test_sif_entry_drift_prevents_scientific_payload_loading(
     from artisan_submitit.worker import run_worker_pack
 
     measured = gpu_launcher
-    if drift == "image":
-        sif.targets[0].sif.write_bytes(b"changed tool image")
-        error = "Prepared SIF bytes changed"
+    if drift == "missing_image":
+        sif.targets[0].sif.unlink()
+        error = "Prepared SIF is unavailable"
     else:
         measured = gpu_launcher.model_copy(
             update={
@@ -903,14 +927,14 @@ def test_sif_adapter_installs_measured_launcher_only_in_execution_copy(
     verify.assert_called_once_with(allocation, expected=gpu_launcher)
 
 
-@pytest.mark.parametrize("drift", [False, True])
+@pytest.mark.parametrize("missing", [False, True])
 def test_fixed_sif_probe_checks_container_without_scientific_calls(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     allocation: NativeGPUAllocation,
     sif: SIFProbeSpec,
     gpu_launcher: ContainerLauncherIdentity,
-    drift: bool,
+    missing: bool,
 ) -> None:
     from artisan_submitit.worker import run_worker_pack
 
@@ -924,8 +948,8 @@ def test_fixed_sif_probe_checks_container_without_scientific_calls(
         "artisan_submitit.worker.capture_allocated_gpu", lambda *_args: allocation
     )
     _mock_sif_host(monkeypatch, sif, gpu_launcher)
-    if drift:
-        sif.targets[0].sif.write_bytes(b"changed tool image")
+    if missing:
+        sif.targets[0].sif.unlink()
     launch = Mock()
     monkeypatch.setattr("artisan_submitit.worker.launch_inert_calls", launch)
     run_worker_pack(str(tmp_path), "c" * 64)
@@ -936,8 +960,8 @@ def test_fixed_sif_probe_checks_container_without_scientific_calls(
     assert evidence.payload_sha256 == request.probe.digest
     assert evidence.ownership == "closed"
     reply = GPUProbeReply.model_validate_json(evidence.reply)
-    if drift:
-        with pytest.raises(RuntimeError, match="Prepared SIF bytes changed"):
+    if missing:
+        with pytest.raises(RuntimeError, match="Prepared SIF is unavailable"):
             reply.result()
     else:
         profile = reply.result()

@@ -78,7 +78,7 @@ class SIFProbeSpec(BaseModel):
         *,
         expected: ContainerLauncherIdentity | None = None,
     ) -> ContainerLauncherIdentity:
-        """Check exact SIFs and the launcher selected for these allocated devices."""
+        """Check prepared SIF availability and the allocated GPU launcher."""
         if self.runtime.identity() != self.launcher:
             msg = "Scheduled SIF launcher changed after preparation"
             raise ValueError(msg)
