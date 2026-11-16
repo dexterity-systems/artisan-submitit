@@ -30,7 +30,6 @@ jobs:
     env:
       ARTISAN_CORE_REF: 983e04cb6cd34e2d38088b791a2ffd7f041a7777
       PIXI_LOCKED: "true"
-      QUALIFICATION_ROOT: ${{ runner.temp }}/artisan-slurm-qualification
       QUALIFICATION_CONTAINER: artisan-slurm-ci-${{ github.run_id }}-${{ github.run_attempt }}
     defaults:
       run:
@@ -45,6 +44,8 @@ jobs:
           ref: ${{ env.ARTISAN_CORE_REF }}
           path: artisan
           fetch-depth: 0
+      - name: Set qualification scratch directory
+        run: printf 'QUALIFICATION_ROOT=%s/artisan-slurm-qualification\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
       - uses: prefix-dev/setup-pixi@v0.10.0
         with:
           manifest-path: artisan-submitit/pyproject.toml
