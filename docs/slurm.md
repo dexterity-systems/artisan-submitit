@@ -33,8 +33,9 @@ the current driver/launcher software before cache lookup. A probe failure retain
 its owner and cannot authorize scientific admission. UUIDs belong to the fresh
 allocation, not reusable software identity. Native/Pixi execution and prepared
 Apptainer SIF tools use this same allocation check. For SIF tools, the probe also
-verifies image bytes, launcher configuration and the GPU libraries selected for
-injection. Worker entry repeats these checks before loading scientific calls.
+checks prepared image metadata, launcher configuration and the GPU libraries
+selected for injection. Worker entry repeats these checks before loading
+scientific calls.
 Leave the controller runtime's `gpu_devices` unset so only the fresh allocation
 supplies devices. Docker GPU tools remain rejected. Qualify actual SIF mounts
 and device visibility on your site before relying on this runtime combination.
@@ -42,10 +43,10 @@ and device visibility on your site before relying on this runtime combination.
 ## Ownership evidence
 
 The provider binds the exact Submitit payload digest before `sbatch`; bootstrap
-verifies it before SDK deserialization. Full scientific software is verified
-again inside the worker. The scheduler's initial shell is a trusted site
-boundary; the fixed prelude removes loader and startup injections before measured
-Python starts.
+verifies it before SDK deserialization. The worker checks prepared target
+availability and Python/package compatibility without auditing every installed
+file. The scheduler's initial shell is a trusted site boundary; the fixed prelude
+removes loader and startup injections before the prepared Python starts.
 
 Cancellation targets only retained numeric job identities. Unit replies and
 whole-worker closure are separate facts. A valid early receipt does not prove a
