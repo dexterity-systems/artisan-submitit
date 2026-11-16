@@ -28,7 +28,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
-      ARTISAN_CORE_REF: main
+      ARTISAN_CORE_REF: 983e04cb6cd34e2d38088b791a2ffd7f041a7777
       PIXI_LOCKED: "true"
       QUALIFICATION_ROOT: ${{ runner.temp }}/artisan-slurm-qualification
       QUALIFICATION_CONTAINER: artisan-slurm-ci-${{ github.run_id }}-${{ github.run_attempt }}
