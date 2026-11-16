@@ -8,7 +8,7 @@ the integration suite checks real scheduler state through `sacct`.
 ## Start the cluster
 
 Use real sibling checkouts when refreshing the host Pixi lock. CI currently
-qualifies [Artisan revision `983e04c`](https://github.com/andrewcolinhunt/artisan-dev/commit/983e04cb6cd34e2d38088b791a2ffd7f041a7777)
+qualifies [Artisan revision `02bd6c2`](https://github.com/andrewcolinhunt/artisan-dev/commit/02bd6c22314b4dc6b76f4bab741d3f462645b895)
 while its matching core changes are under review. Use that revision in the sibling
 checkout and point `ARTISAN_WORKTREE` at it with an absolute path; Compose resolves
 relative paths from this `docker/` directory:
@@ -38,7 +38,7 @@ Inside the container, install both editable projects for development:
 pixi install --locked -e dev
 pixi run --locked -e dev python scripts/verify_sources.py \
     /workspace/artisan /workspace/artisan-submitit \
-    983e04cb6cd34e2d38088b791a2ffd7f041a7777
+    02bd6c22314b4dc6b76f4bab741d3f462645b895
 ```
 
 The Compose environment mounts:
