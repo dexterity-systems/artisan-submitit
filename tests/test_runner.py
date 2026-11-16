@@ -16,6 +16,7 @@ from artisan.orchestration.runner_api import (
 
 from artisan_submitit.runner import _validate_parameters
 from artisan_submitit.slurm import SlurmRunner
+from artisan_submitit.srun import SlurmIntraRunner
 
 
 def _runner() -> SlurmRunner:
@@ -126,3 +127,60 @@ def test_preparation_keeps_authored_defaults_without_login_node_gpu_selection(
     assert (None if override is None else override.model_dump()) == before
     assert defaults.gpus == 2
     assert defaults.extra == {"slurm_partition": "gpu"}
+
+
+@pytest.mark.parametrize("curator", [False, True])
+@pytest.mark.parametrize("step_extra", [False, True])
+def test_cpu_intra_dispatch_preserves_declared_node_selection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, curator: bool, step_extra: bool
+) -> None:
+    runner = object.__new__(SlurmIntraRunner)
+    selection = {"slurm_nodelist": "selected-node"}
+    object.__setattr__(runner, "parameters", {} if step_extra else selection)
+    object.__setattr__(runner, "scheduler_bin", Path("/usr/bin"))
+    object.__setattr__(runner, "log_folder", tmp_path)
+    local = Mock(spec=PreparedLocalBindings)
+    local.worker_is_observed = False
+    local.native_gpu = None
+    method = "resolve_curator" if curator else "resolve"
+    monkeypatch.setattr(LocalRunner, method, Mock(return_value=local))
+    capture = Mock()
+    monkeypatch.setattr("artisan_submitit.runner.SchedulerSoftware.capture", capture)
+    resources = RunnerResources(gpus=0, extra=selection if step_extra else {})
+    software = getattr(runner, method)(Mock(), resources)
+    owner = Mock()
+    monkeypatch.setattr("artisan_submitit.srun._SrunPack", owner)
+    monkeypatch.setenv("SLURM_JOB_ID", "41")
+
+    runner.create_owner(Mock() if curator else (), software, Mock())
+
+    assert owner.call_args.args[-1] == ["--nodelist=selected-node"]
+    assert runner.parameters == ({} if step_extra else selection)
+    assert software.resources == resources
+
+
+@pytest.mark.parametrize("curator", [False, True])
+def test_gpu_intra_preparation_keeps_node_selection_without_probing(
+    monkeypatch: pytest.MonkeyPatch, curator: bool
+) -> None:
+    runner = object.__new__(SlurmIntraRunner)
+    object.__setattr__(runner, "parameters", {"slurm_nodelist": "gpu-node"})
+    object.__setattr__(runner, "scheduler_bin", Path("/usr/bin"))
+    local = Mock(spec=PreparedLocalBindings)
+    local.worker_is_observed = False
+    local.native_gpu = None
+    resolve_method = "resolve_curator" if curator else "resolve"
+    prepare_method = "prepare_curator" if curator else "prepare"
+    monkeypatch.setattr(LocalRunner, resolve_method, Mock(return_value=local))
+    monkeypatch.setattr("artisan_submitit.runner.SchedulerSoftware.capture", Mock())
+    probe = Mock()
+    monkeypatch.setattr(SlurmIntraRunner, "_measure_gpu", probe)
+
+    def prepare(self: SlurmIntraRunner, subject: object, **options: object) -> None:
+        getattr(self, resolve_method)(subject, options["runner_resources"])
+
+    monkeypatch.setattr(LocalRunner, prepare_method, prepare)
+    getattr(runner, prepare_method)(Mock(), runner_resources=RunnerResources(gpus=2))
+
+    probe.assert_not_called()
+    assert runner.parameters == {"slurm_nodelist": "gpu-node"}

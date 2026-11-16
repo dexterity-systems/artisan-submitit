@@ -20,7 +20,7 @@ from artisan.orchestration.runner_api import (
 
 from artisan_submitit.calls import ProbeDispatch
 from artisan_submitit.control import EntryIdentity, PackRequest
-from artisan_submitit.gpu import GPUProbeSpec
+from artisan_submitit.gpu import GPUProbeSpec, concrete_node
 from artisan_submitit.launcher import bootstrap_command
 from artisan_submitit.runner import SchedulerRunner
 from artisan_submitit.software import SlurmSoftware
@@ -50,6 +50,14 @@ class SlurmIntraRunner(SchedulerRunner):
             msg = "Intra-allocation dispatch accepts only bounded srun_args"
             raise ValueError(msg)
         arguments = list(validate_srun_arguments(parameters.get("srun_args", [])))
+        if (
+            "slurm_nodelist" in parameters
+            and not software.resources.gpus
+            and not isinstance(assignments, GPUProbeSpec)
+        ):
+            arguments.append(
+                f"--nodelist={concrete_node(parameters['slurm_nodelist'])}"
+            )
         return _SrunPack(
             assignments, software, dispatch, self.log_folder, allocation, arguments
         )
