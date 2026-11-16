@@ -95,15 +95,17 @@ Commits use `type: Brief description`. Never push without explicit approval.
 
 ```text
 src/artisan_submitit/
-├── slurm.py         # Submitit/AutoExecutor runner and lifecycle router
-├── srun.py          # Intra-allocation runner and process lifecycle router
-├── srun_worker.py   # Serialized callable/result-file worker protocol
-├── worker.py        # Public native-runner composition and ownership evidence
-├── cancellation.py  # Shared cancellation budget and exact scheduler evidence
-└── utils.py         # Scheduler limits, time parsing, and log helpers
+├── slurm.py         # One Submitit submission per admitted worker pack
+├── srun.py          # Exact intra-allocation step and launcher ownership
+├── runner.py        # Shared core preparation/resolution and provider admission
+├── software.py      # Full worker/provider/SDK/scheduler software identity
+├── bootstrap.py     # Pre-deserialization payload and runtime verification
+├── transport.py     # Retained scheduler pack owners and typed replies
+├── worker.py        # Core inert-call composition and unit cleanup
+├── gpu.py           # Fresh scheduled software probe and allocation checks
+└── cancellation.py  # Exact scheduler evidence within one cleanup deadline
 ```
 
 Artisan owns batching and unit execution. This package owns only transport to
 SLURM and implements the public `artisan.orchestration.runner_api` contract.
-Compute-node ownership composes the public `artisan.orchestration.Runner.LOCAL`
-facade. Do not import core's private execution or supervision implementations.
+Compute-node ownership uses the public inert-call and worker-owner contracts. Do not import core's private execution or supervision implementations.

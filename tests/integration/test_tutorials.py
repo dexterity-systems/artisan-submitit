@@ -35,7 +35,7 @@ def test_tutorial(notebook_name: str, monkeypatch: pytest.MonkeyPatch) -> None:
     run_root = shared_root / run_name
     run_root.mkdir(parents=True)
     monkeypatch.setenv("ARTISAN_TUTORIAL_ROOT", str(run_root))
-    output_root = _PROJECT_ROOT / "slurm_logs" / "tutorials" / run_name
+    output_root = run_root / "executed"
     output_root.mkdir(parents=True)
     notebook = nbformat.read(
         _PROJECT_ROOT / "docs" / "tutorials" / notebook_name, as_version=4

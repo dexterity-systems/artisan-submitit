@@ -87,6 +87,40 @@ def reject_managed_scheduler_arguments(
             raise ValueError(msg)
 
 
+def validate_srun_arguments(arguments: object) -> tuple[str, ...]:
+    """Accept literal affinity/logging options without changing process ownership."""
+    reject_managed_scheduler_arguments(arguments, "srun_args")
+    assert isinstance(arguments, Sequence)
+    valued = {"--cpu-bind", "--mem-bind", "--hint", "--distribution"}
+    flags = {"--label", "--unbuffered", "--quiet", "--verbose"}
+    result = tuple(str(argument) for argument in arguments)
+    index = 0
+    while index < len(result):
+        argument = result[index]
+        option, separator, value = argument.partition("=")
+        if option in flags and not separator:
+            index += 1
+            continue
+        if option not in valued:
+            msg = f"srun_args cannot change owned launch behavior: {argument!r}"
+            raise ValueError(msg)
+        if not separator:
+            index += 1
+            if index >= len(result):
+                msg = f"srun_args option requires a value: {option}"
+                raise ValueError(msg)
+            value = result[index]
+        if (
+            not value
+            or value.startswith("-")
+            or any(char in value for char in "\n\r\x00")
+        ):
+            msg = f"srun_args option requires one literal value: {option}"
+            raise ValueError(msg)
+        index += 1
+    return result
+
+
 def is_managed_scheduler_option(option: str) -> bool:
     """Return whether a scheduler option overrides Artisan-owned policy."""
     if option in _MANAGED_SCHEDULER_SHORT_OPTIONS:

@@ -16,7 +16,7 @@ its results.
 You need Python 3.12 or newer, both packages installed in an environment visible
 at the same path on the manager and compute nodes, and a shared filesystem for
 the tutorial's data and logs. Queue-based tutorials also need working SLURM
-accounting through `sacct`. The examples use CPU resources only.
+accounting through `sacct`. The examples use CPU resources only. The locked manifest must include the same installed core, provider and application packages as the kernel. Setup explicitly calls `runner.prepare`; submission only looks up those targets.
 
 With released packages, install the runtime and notebook tools into your Python
 environment:
@@ -31,6 +31,9 @@ set a shared output location and your cluster's partition:
 ```bash
 export ARTISAN_TUTORIAL_ROOT=/shared/your-user/artisan-submitit-tutorials
 export ARTISAN_SLURM_PARTITION=cpu
+export ARTISAN_SLURM_MANIFEST=/shared/software/pixi.toml
+export ARTISAN_SLURM_ENVIRONMENT=worker
+export ARTISAN_SLURM_CACHE=/shared/artisan/prepared
 # Set this if your cluster requires an account.
 export ARTISAN_SLURM_ACCOUNT=your-account
 python -m jupyterlab docs/tutorials
@@ -41,7 +44,7 @@ the Python kernel from the environment where you installed the packages. Each
 notebook prints the imported package versions and paths before submitting work.
 
 For development, the repository's Pixi environment includes both editable
-packages and Jupyter. Follow the [development checkout setup](https://github.com/dexterity-systems/artisan-submitit/blob/main/README.md#development-and-docker),
+packages and Jupyter. Follow the [development checkout setup](../../README.md#tutorials-and-development),
 then run:
 
 ```bash
@@ -61,7 +64,7 @@ environment variables above and any account options required by your site:
 
 ```bash
 # Add --account=your-account if your site requires it.
-salloc --partition="$ARTISAN_SLURM_PARTITION" --ntasks=2 --mem=4G --time=00:15:00
+salloc --partition="$ARTISAN_SLURM_PARTITION" --nodes=1 --ntasks=1 --cpus-per-task=2 --mem=4G --time=00:15:00
 ~/.pixi/bin/pixi run -e tutorials tutorials
 ```
 
@@ -81,7 +84,7 @@ in order.
 ## Validate tutorial changes
 
 The tutorial tests execute the notebooks themselves and retain executed copies
-under `slurm_logs/tutorials/`. From a shell with scheduler access, run:
+in each tutorial run directory’s `executed/` subfolder. From a shell with scheduler access, run:
 
 ```bash
 ~/.pixi/bin/pixi run -e tutorials test-tutorial-sbatch

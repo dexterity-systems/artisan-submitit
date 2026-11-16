@@ -1,447 +1,332 @@
-"""Shared worker ownership, evidence publication, and real native execution."""
+"""Provider entry evidence preserves core cleanup and unit isolation."""
 
 from __future__ import annotations
 
-import json
-import os
-import pickle
-import subprocess
-import sys
-import threading
-import time
-from dataclasses import replace
-from functools import partial
 from pathlib import Path
-from typing import Any
-from unittest.mock import MagicMock, patch
+from types import SimpleNamespace
+from typing import cast
+from unittest.mock import Mock
 
-import cloudpickle
-import polars as pl
 import pytest
-from artisan.operations.examples import DataGenerator, StreamingEcho, Wait
 from artisan.orchestration.runner_api import (
-    CancellationAcknowledgement,
-    CancellationStatus,
-    ExecutionUnit,
-    RuntimeEnvironment,
-    UnitResult,
-)
-from artisan.schemas.operation_config.environment_spec import LocalEnvironmentSpec
-from artisan.schemas.specs.input_models import ExecuteInput
-from artisan.storage.io.commit import DeltaCommitter
-from artisan.storage.io.staging import StagingManager
-from artisan.utils.external_tools import run_command
-
-from artisan_submitit.utils import write_atomic
-from artisan_submitit.worker import (
-    WorkerOutcome,
-    read_worker_identity,
-    read_worker_outcome,
-    run_worker_batch,
+    AssignmentReplyContext,
+    CommandOwnershipError,
+    LocalPackStartupError,
+    OwnershipState,
 )
 
-
-def _unit() -> ExecutionUnit:
-    return ExecutionUnit(operation=Wait(), inputs={}, step_number=3)
-
-
-def _result() -> UnitResult:
-    return UnitResult(True, None, 1, ["execution-1"], worker_log="worker output")
+from artisan_submitit.control import EntryEvidence, EntryIdentity, UnitEvidence
+from artisan_submitit.worker import _collect, run_worker_pack
+from tests.test_prepared_transport import _attempt
 
 
-def _runtime(tmp_path: Path, **values: Any) -> RuntimeEnvironment:
-    return RuntimeEnvironment(
-        delta_root=str(tmp_path / "delta"),
-        staging_root=str(tmp_path / "staging"),
-        working_root=str(tmp_path / "working"),
-        **values,
+class _Request(SimpleNamespace):
+    @property
+    def result_count(self) -> int:
+        return 1 if self.probe is not None else len(self.calls)
+
+    def payload_digest(self, index: int) -> str:
+        return (
+            self.probe.digest
+            if self.probe is not None
+            else self.calls[index].header.payload_sha256
+        )
+
+
+def _request(tmp_path: Path) -> _Request:
+    context = AssignmentReplyContext(
+        attempt=_attempt(), payload_sha256="f" * 64, sensitive_values=()
+    )
+    return _Request(
+        probe=None,
+        gpu=None,
+        pack_id="a" * 32,
+        profile="profile",
+        working_root=tmp_path / "working",
+        runtime_env={},
+        preserve_working=False,
+        calls=(
+            SimpleNamespace(
+                reply_context=context.model_dump_json(),
+                header=SimpleNamespace(payload_sha256="f" * 64),
+                load=lambda _directory: None,
+            ),
+        ),
     )
 
 
-@patch("artisan_submitit.worker.Runner.LOCAL.create_lifecycle_router")
-def test_request_before_dispatch_never_starts_native_work(
-    factory: MagicMock, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def _identity() -> EntryIdentity:
+    return EntryIdentity(pack_id="a" * 32, entry_id="b" * 32, job_id="41", step_id="41")
+
+
+def test_unknown_reply_retains_scratch_even_when_owner_claims_closed(
+    tmp_path: Path,
 ) -> None:
-    monkeypatch.setenv("SLURM_JOB_ID", "123")
-    monkeypatch.setenv("SLURM_STEP_ID", "7")
+    request = _request(tmp_path)
+    handle = Mock(done=lambda: True, ownership_state=lambda: OwnershipState.CLOSED)
+    handle.result.side_effect = CommandOwnershipError("unknown descendants")
+    owner = Mock(ownership_state=lambda: OwnershipState.CLOSED)
+    assert not _collect(tmp_path, tmp_path, _identity(), request, (handle,), (owner,))
+    owner.request_close.assert_not_called()
+    assert (
+        UnitEvidence.model_validate_json(
+            (tmp_path / "unit-0.json").read_bytes()
+        ).ownership
+        == "unknown"
+    )
+
+
+def test_unit_cancel_does_not_kill_shared_owner_or_sibling(tmp_path: Path) -> None:
+    request = _request(tmp_path)
+    request.calls *= 2
+    (tmp_path / "cancel-0").touch()
+    first = Mock(done=lambda: True, ownership_state=lambda: OwnershipState.CLOSED)
+    second = Mock(done=lambda: True, ownership_state=lambda: OwnershipState.CLOSED)
+    first.result.return_value = second.result.return_value = b"{}"
+    owner = Mock(ownership_state=lambda: OwnershipState.CLOSED)
+    assert _collect(tmp_path, tmp_path, _identity(), request, (first, second), (owner,))
+    first.cancel.assert_called_once()
+    second.cancel.assert_not_called()
+    owner.request_close.assert_not_called()
+
+
+def test_request_before_entry_never_launches_core_work(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    request = _request(tmp_path)
+    monkeypatch.setenv("ARTISAN_SUBMITIT_ENTRY_ID", "b" * 32)
+    monkeypatch.setenv("SLURM_JOB_ID", "41")
+    monkeypatch.setattr("artisan_submitit.worker.read_pack", lambda *_args: request)
+    launch = Mock()
+    monkeypatch.setattr("artisan_submitit.worker.launch_inert_calls", launch)
+    (tmp_path / "cancel").touch()
+    run_worker_pack(str(tmp_path), "c" * 64)
+    launch.assert_not_called()
+    entry = tmp_path / "entries" / ("b" * 32)
+    assert (
+        EntryEvidence.model_validate_json(
+            (entry / "outcome.json").read_bytes()
+        ).ownership
+        == "closed"
+    )
+    assert UnitEvidence.model_validate_json(
+        (entry / "unit-0.json").read_bytes()
+    ).cancelled
+    assert not (request.working_root / request.pack_id / ("b" * 32)).exists()
+
+
+def test_zero_handle_startup_uncertainty_cannot_publish_closure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    request = _request(tmp_path)
+    monkeypatch.setenv("ARTISAN_SUBMITIT_ENTRY_ID", "b" * 32)
+    monkeypatch.setenv("SLURM_JOB_ID", "41")
+    monkeypatch.setattr("artisan_submitit.worker.read_pack", lambda *_args: request)
+    monkeypatch.setattr(
+        "artisan_submitit.worker.LocalWorkerProfile.from_json", lambda _encoded: None
+    )
+    error = LocalPackStartupError((), cast(tuple, (SimpleNamespace(state="unknown"),)))
+    monkeypatch.setattr(
+        "artisan_submitit.worker.launch_inert_calls", Mock(side_effect=error)
+    )
+    run_worker_pack(str(tmp_path), "c" * 64)
+    entry = tmp_path / "entries" / ("b" * 32)
+    assert (
+        EntryEvidence.model_validate_json(
+            (entry / "outcome.json").read_bytes()
+        ).ownership
+        == "unknown"
+    )
+    assert (
+        UnitEvidence.model_validate_json((entry / "unit-0.json").read_bytes()).ownership
+        == "unknown"
+    )
+    assert (request.working_root / request.pack_id / ("b" * 32)).is_dir()
+
+
+@pytest.mark.parametrize("preserve", [False, True])
+def test_outer_cleanup_honors_core_preservation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, preserve: bool
+) -> None:
+    request = _request(tmp_path)
+    request.preserve_working = preserve
+    monkeypatch.setenv("ARTISAN_SUBMITIT_ENTRY_ID", "b" * 32)
+    monkeypatch.setenv("SLURM_JOB_ID", "41")
+    monkeypatch.setattr("artisan_submitit.worker.read_pack", lambda *_args: request)
+    monkeypatch.setattr(
+        "artisan_submitit.worker.LocalWorkerProfile.from_json", lambda _encoded: None
+    )
+    owner = Mock(ownership_state=lambda: OwnershipState.CLOSED)
+    handle = Mock(
+        done=lambda: True,
+        ownership_state=lambda: OwnershipState.CLOSED,
+        worker_owner=owner,
+    )
+    handle.result.return_value = b"{}"
+    launch = Mock(return_value=(handle,))
+    monkeypatch.setattr("artisan_submitit.worker.launch_inert_calls", launch)
+    run_worker_pack(str(tmp_path), "c" * 64)
+    assert launch.call_args.kwargs["preserve_working"] is preserve
+    scratch = request.working_root / request.pack_id / ("b" * 32)
+    assert scratch.exists() is preserve
+
+
+def test_pack_cancel_drains_unit_reply_before_stopping_interpreter(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    request = _request(tmp_path)
+    (tmp_path / "cancel").touch()
+    events: list[str] = []
+    clock = [0.0]
+    owner_closed = [False]
+
+    def stop_owner(deadline: float) -> None:
+        assert "reply" in events
+        assert deadline == 8.0
+        owner_closed[0] = True
+        events.append("owner")
+
+    def reply(*_args: object, **_kwargs: object) -> bytes:
+        events.append("reply")
+        return b"{}"
+
+    owner = Mock(
+        ownership_state=lambda: OwnershipState.CLOSED
+        if owner_closed[0]
+        else OwnershipState.PENDING,
+        request_close=stop_owner,
+    )
+    handle = Mock(
+        done=lambda: clock[0] >= 1,
+        ownership_state=owner.ownership_state,
+        result=reply,
+        cancel=lambda: events.append("unit"),
+    )
+    monkeypatch.setattr("artisan_submitit.worker.time.monotonic", lambda: clock[0])
+    monkeypatch.setattr(
+        "artisan_submitit.worker.time.sleep",
+        lambda _seconds: clock.__setitem__(0, clock[0] + 1),
+    )
+    assert _collect(tmp_path, tmp_path, _identity(), request, (handle,), (owner,))
+    assert events.index("unit") < events.index("reply") < events.index("owner")
+
+
+def test_pack_cancel_forces_blocked_native_at_original_deadline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    request = _request(tmp_path)
+    (tmp_path / "cancel").touch()
+    clock = [0.0]
+    requests: list[tuple[float, float]] = []
+    owner = Mock(
+        ownership_state=lambda: OwnershipState.PENDING,
+        request_close=lambda deadline: requests.append((clock[0], deadline)),
+    )
+    handle = Mock(done=lambda: False, ownership_state=owner.ownership_state)
+    monkeypatch.setattr("artisan_submitit.worker.time.monotonic", lambda: clock[0])
+    monkeypatch.setattr(
+        "artisan_submitit.worker.time.sleep",
+        lambda _seconds: clock.__setitem__(0, clock[0] + 1),
+    )
+    assert not _collect(tmp_path, tmp_path, _identity(), request, (handle,), (owner,))
+    assert requests[0] == (6.0, 8.0)
+    assert all(deadline == 8.0 for _, deadline in requests)
+    assert clock[0] == 8.0
+    assert (
+        UnitEvidence.model_validate_json(
+            (tmp_path / "unit-0.json").read_bytes()
+        ).ownership
+        == "unknown"
+    )
+
+
+@pytest.mark.parametrize("failure", ["cancel", "state", "close"])
+def test_cleanup_failure_still_attempts_sibling_owner_and_preserves_unknown(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    request = _request(tmp_path)
+    (tmp_path / "cancel").touch()
+    clock = [0.0]
+    first = Mock(ownership_state=lambda: OwnershipState.PENDING)
+    second = Mock(ownership_state=lambda: OwnershipState.PENDING)
+    handle = Mock(done=lambda: True, ownership_state=lambda: OwnershipState.CLOSED)
+    handle.result.return_value = b"{}"
+    if failure == "cancel":
+        handle.cancel.side_effect = RuntimeError("cancel unavailable")
+    elif failure == "state":
+        first.ownership_state = Mock(side_effect=RuntimeError("state unavailable"))
+    else:
+        first.request_close.side_effect = RuntimeError("close unavailable")
+    monkeypatch.setattr("artisan_submitit.worker.time.monotonic", lambda: clock[0])
+    monkeypatch.setattr(
+        "artisan_submitit.worker.time.sleep",
+        lambda _seconds: clock.__setitem__(0, clock[0] + 1),
+    )
+    assert not _collect(
+        tmp_path, tmp_path, _identity(), request, (handle,), (first, second)
+    )
+    assert clock[0] == 8.0
+    assert first.request_close.call_count == second.request_close.call_count
+    assert second.request_close.call_count > 0
+    assert all(call.args == (8.0,) for call in second.request_close.call_args_list)
+    if failure != "close":
+        handle.result.assert_not_called()
+        assert (
+            UnitEvidence.model_validate_json(
+                (tmp_path / "unit-0.json").read_bytes()
+            ).ownership
+            == "unknown"
+        )
+
+
+def test_result_write_failure_closes_all_owners_without_claiming_closure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    request = _request(tmp_path)
+    clock = [0.0]
+    first = Mock(ownership_state=lambda: OwnershipState.PENDING)
+    second = Mock(ownership_state=lambda: OwnershipState.PENDING)
+    handle = Mock(done=lambda: True, ownership_state=lambda: OwnershipState.CLOSED)
+    handle.result.return_value = b"{}"
+    monkeypatch.setattr(
+        "artisan_submitit.worker.write_once",
+        Mock(side_effect=OSError("evidence unavailable")),
+    )
+    monkeypatch.setattr("artisan_submitit.worker.time.monotonic", lambda: clock[0])
+    monkeypatch.setattr(
+        "artisan_submitit.worker.time.sleep",
+        lambda _seconds: clock.__setitem__(0, clock[0] + 1),
+    )
+    assert not _collect(
+        tmp_path, tmp_path, _identity(), request, (handle,), (first, second)
+    )
+    assert first.request_close.call_count == second.request_close.call_count
+    assert second.request_close.call_count > 0
+    assert all(call.args == (8.0,) for call in second.request_close.call_args_list)
+    assert clock[0] == 8.0
+    assert not (tmp_path / "unit-0.json").exists()
+
+
+def test_pre_entry_result_write_failure_cannot_publish_closed_outcome(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from artisan_submitit.control import write_once
+
+    request = _request(tmp_path)
+    monkeypatch.setenv("ARTISAN_SUBMITIT_ENTRY_ID", "b" * 32)
+    monkeypatch.setenv("SLURM_JOB_ID", "41")
+    monkeypatch.setattr("artisan_submitit.worker.read_pack", lambda *_args: request)
     (tmp_path / "cancel").touch()
 
-    outcome = run_worker_batch([_unit()], _runtime(tmp_path), tmp_path)
+    def fail_unit(path: Path, data: bytes) -> None:
+        if path.name == "unit-0.json":
+            raise OSError("result publication failed")
+        write_once(path, data)
 
-    factory.assert_not_called()
-    assert outcome.cancellation_acknowledgement.status == CancellationStatus.CONFIRMED
-    assert len(outcome.results) == 1
-    assert not outcome.results[0].success
-    assert read_worker_outcome(tmp_path) == outcome
-    assert read_worker_identity(tmp_path)["job_id"] == "123"
-    assert read_worker_identity(tmp_path)["step_id"] == "7"
-    assert not list(tmp_path.glob("*.tmp"))
-
-
-@patch("artisan_submitit.worker.Runner.LOCAL.create_lifecycle_router")
-def test_native_batch_preserves_runtime_and_original_results(
-    factory: MagicMock, tmp_path: Path
-) -> None:
-    runtime = _runtime(tmp_path, worker_id=42, worker_id_env_var="SLURM_STEP_ID")
-    router = factory.return_value
-    router.run.return_value = [_result()]
-    router.cancellation_acknowledgement = None
-
-    outcome = run_worker_batch([_unit()], runtime, tmp_path)
-
-    assert outcome.results == [_result()]
-    assert outcome.cancellation_acknowledgement is None
-    assert router.run.call_args.args[1] is runtime
-    strategy = factory.call_args.args[1]
-    assert strategy.max_workers == 1
-    assert strategy.units_per_worker == 1
-    assert factory.call_args.args[2] == 3
-    assert read_worker_outcome(tmp_path) == outcome
-    assert not any(
-        thread.name == "artisan-submitit-cancel-watcher"
-        for thread in threading.enumerate()
-    )
-
-
-@patch("artisan_submitit.worker.Runner.LOCAL.create_lifecycle_router")
-def test_request_during_native_startup_reaches_event(
-    factory: MagicMock, tmp_path: Path
-) -> None:
-    router = factory.return_value
-    router.cancellation_acknowledgement = CancellationAcknowledgement(
-        CancellationStatus.CONFIRMED
-    )
-
-    def native_run(
-        *args: Any, cancel_event: threading.Event, **kwargs: Any
-    ) -> list[UnitResult]:
-        (tmp_path / "cancel").touch()
-        assert cancel_event.wait(timeout=2)
-        return [_result()]
-
-    router.run.side_effect = native_run
-    outcome = run_worker_batch([_unit()], _runtime(tmp_path), tmp_path)
-
-    assert outcome.cancellation_acknowledgement.status == CancellationStatus.CONFIRMED
-    assert outcome.results[0].cancellation_acknowledgement is None
-
-
-@pytest.mark.parametrize(
-    "status", [CancellationStatus.UNKNOWN, CancellationStatus.REQUESTED]
-)
-@patch("artisan_submitit.worker.Runner.LOCAL.create_lifecycle_router")
-def test_unresolved_native_owner_fails_results_without_losing_diagnostics(
-    factory: MagicMock, status: CancellationStatus, tmp_path: Path
-) -> None:
-    nested = CancellationAcknowledgement(
-        CancellationStatus.UNKNOWN, "remote cleanup unknown"
-    )
-    original = replace(
-        _result(), error="unit diagnostic", cancellation_acknowledgement=nested
-    )
-    router = factory.return_value
-    router.run.return_value = [original]
-    router.cancellation_acknowledgement = CancellationAcknowledgement(
-        status, "owner cleanup unknown"
-    )
-
-    outcome = run_worker_batch([_unit()], _runtime(tmp_path), tmp_path)
-
-    assert outcome.cancellation_acknowledgement.status == CancellationStatus.UNKNOWN
-    result = outcome.results[0]
-    assert not result.success
-    assert result.execution_run_ids == original.execution_run_ids
-    assert result.worker_log == original.worker_log
-    assert result.error == "unit diagnostic"
-    assert result.cancellation_acknowledgement == nested
-
-
-@patch("artisan_submitit.worker.Runner.LOCAL.create_lifecycle_router")
-def test_watcher_error_requests_cleanup_and_preserves_uncertainty(
-    factory: MagicMock, tmp_path: Path
-) -> None:
-    router = factory.return_value
-    router.cancellation_acknowledgement = CancellationAcknowledgement(
-        CancellationStatus.CONFIRMED
-    )
-
-    def native_run(
-        *args: Any, cancel_event: threading.Event, **kwargs: Any
-    ) -> list[UnitResult]:
-        assert cancel_event.wait(timeout=2)
-        return [_result()]
-
-    router.run.side_effect = native_run
-    with patch(
-        "artisan_submitit.worker._request_exists",
-        side_effect=[False, PermissionError("request denied")],
-    ):
-        outcome = run_worker_batch([_unit()], _runtime(tmp_path), tmp_path)
-
-    assert outcome.cancellation_acknowledgement.status == CancellationStatus.UNKNOWN
-    assert "request denied" in outcome.cancellation_acknowledgement.message
+    monkeypatch.setattr("artisan_submitit.worker.write_once", fail_unit)
+    run_worker_pack(str(tmp_path), "c" * 64)
+    outcome = tmp_path / "entries" / ("b" * 32) / "outcome.json"
     assert (
-        outcome.results[0].cancellation_acknowledgement.status
-        == CancellationStatus.UNKNOWN
+        EntryEvidence.model_validate_json(outcome.read_bytes()).ownership == "unknown"
     )
-    assert not outcome.results[0].success
-
-
-@patch("artisan_submitit.worker.Runner.LOCAL.create_lifecycle_router")
-def test_native_exception_stops_watcher_without_publishing_closure(
-    factory: MagicMock, tmp_path: Path
-) -> None:
-    factory.return_value.run.side_effect = RuntimeError("native bootstrap failed")
-
-    with pytest.raises(RuntimeError, match="native bootstrap failed"):
-        run_worker_batch([_unit()], _runtime(tmp_path), tmp_path)
-
-    assert read_worker_outcome(tmp_path) is None
-    assert read_worker_identity(tmp_path) is not None
-    assert not any(
-        thread.name == "artisan-submitit-cancel-watcher"
-        for thread in threading.enumerate()
-    )
-
-
-@patch("artisan_submitit.worker.Runner.LOCAL.create_lifecycle_router")
-def test_native_unknown_does_not_wait_for_unresolved_collection(
-    factory: MagicMock, tmp_path: Path
-) -> None:
-    router = factory.return_value
-    router.run.return_value = [_result()]
-    router.is_done.return_value = False
-    router.cancellation_acknowledgement = CancellationAcknowledgement(
-        CancellationStatus.UNKNOWN, "Native cleanup deadline expired"
-    )
-
-    outcome = run_worker_batch([_unit()], _runtime(tmp_path), tmp_path)
-
-    assert outcome.cancellation_acknowledgement.status == CancellationStatus.UNKNOWN
-    assert not outcome.results[0].success
-    assert read_worker_outcome(tmp_path) == outcome
-    router.collect.assert_not_called()
-    router.cancel.assert_not_called()
-
-
-@pytest.mark.parametrize("reader", [read_worker_outcome, read_worker_identity])
-def test_missing_control_file_is_pending(reader: Any, tmp_path: Path) -> None:
-    assert reader(tmp_path) is None
-
-
-@pytest.mark.parametrize(
-    "value",
-    [
-        None,
-        [],
-        WorkerOutcome([], CancellationAcknowledgement(CancellationStatus.REQUESTED)),
-        WorkerOutcome(["bad result"], None),
-    ],
-)
-def test_invalid_outcome_is_rejected(value: object, tmp_path: Path) -> None:
-    (tmp_path / "outcome.pkl").write_bytes(pickle.dumps(value))
-    with pytest.raises(ValueError, match=r"malformed|invalid"):
-        read_worker_outcome(tmp_path)
-
-
-def test_corrupt_pickle_is_rejected(tmp_path: Path) -> None:
-    (tmp_path / "outcome.pkl").write_bytes(b"broken pickle")
-    with pytest.raises(ValueError, match="unreadable"):
-        read_worker_outcome(tmp_path)
-
-
-def test_reader_exposes_owner_uncertainty(tmp_path: Path) -> None:
-    acknowledgement = CancellationAcknowledgement(
-        CancellationStatus.UNKNOWN, "native owner missing"
-    )
-    (tmp_path / "outcome.pkl").write_bytes(
-        pickle.dumps(WorkerOutcome([_result()], acknowledgement))
-    )
-    outcome = read_worker_outcome(tmp_path)
-    assert not outcome.results[0].success
-    assert outcome.results[0].cancellation_acknowledgement == acknowledgement
-    assert outcome.results[0].execution_run_ids == ["execution-1"]
-
-
-@pytest.mark.parametrize("value", [{}, [], {"job_id": 123}, "invalid json"])
-def test_invalid_identity_is_rejected(value: object, tmp_path: Path) -> None:
-    (tmp_path / "identity.json").write_text(json.dumps(value))
-    with pytest.raises(ValueError, match="malformed"):
-        read_worker_identity(tmp_path)
-
-
-def test_atomic_publish_failure_preserves_previous_file(tmp_path: Path) -> None:
-    destination = tmp_path / "outcome.pkl"
-    destination.write_bytes(b"previous")
-    with patch.object(Path, "replace", side_effect=OSError("rename failed")):
-        with pytest.raises(OSError, match="rename failed"):
-            write_atomic(destination, b"new")
-    assert destination.read_bytes() == b"previous"
-    assert not list(tmp_path.glob("*.tmp"))
-
-
-class ObservedWait(Wait):
-    """Expose actual execution admission before invoking the current Wait."""
-
-    name = "observed_wait"
-
-    def execute_function(self, inputs: ExecuteInput) -> dict[str, Any]:
-        Path(os.environ["ARTISAN_SUBMITIT_TEST_MARKER"]).write_text(str(os.getpid()))
-        return super().execute_function(inputs)
-
-
-class ObservedCommand(Wait):
-    """Expose the exact managed-command PID before waiting for cancellation."""
-
-    name = "observed_command"
-
-    def execute_function(self, inputs: ExecuteInput) -> dict[str, Any]:
-        run_command(
-            LocalEnvironmentSpec(),
-            [
-                sys.executable,
-                "-c",
-                "import os,time; from pathlib import Path; "
-                "Path(os.environ['ARTISAN_SUBMITIT_TEST_MARKER']).write_text(str(os.getpid())); time.sleep(60)",
-            ],
-            cwd=inputs.execute_dir,
-        )
-        return {"elapsed": 60}
-
-
-def _prepare_real_worker(
-    tmp_path: Path, unit: ExecutionUnit, runtime: RuntimeEnvironment
-) -> dict[str, str]:
-    fs = runtime.storage.filesystem()
-    DeltaCommitter(
-        runtime.delta_root, StagingManager(runtime.staging_root, fs), fs=fs
-    ).initialize_tables()
-    with (tmp_path / "job.pkl").open("wb") as stream:
-        cloudpickle.dump(partial(run_worker_batch, [unit], runtime, tmp_path), stream)
-    environment = dict(os.environ)
-    environment["PYTHONPATH"] = os.pathsep.join(
-        (
-            str(Path(__file__).parents[1]),
-            str(tmp_path),
-            environment.get("PYTHONPATH", ""),
-        )
-    )
-    return environment
-
-
-@pytest.mark.parametrize("identity_variable", ["SLURM_ARRAY_TASK_ID", "SLURM_STEP_ID"])
-def test_real_worker_preserves_identity_and_explicit_applications(
-    tmp_path: Path, identity_variable: str
-) -> None:
-    trusted, ambient = "provider_trusted_app", "provider_ambient_app"
-    for module in (trusted, ambient):
-        (tmp_path / f"{module}.py").write_text(
-            f"from pathlib import Path\nPath({str(tmp_path / module)!r}).touch()\n"
-        )
-    runtime = _runtime(
-        tmp_path,
-        worker_id=42,
-        worker_id_env_var=identity_variable,
-        application_modules=(trusted,),
-    )
-    unit = ExecutionUnit(
-        operation=DataGenerator(params=DataGenerator.Params(count=1, rows_per_file=1)),
-        inputs={},
-        step_number=0,
-    )
-    environment = _prepare_real_worker(tmp_path, unit, runtime)
-    environment.update({identity_variable: "7", "ARTISAN_LOAD_MODULES": ambient})
-
-    completed = subprocess.run(
-        [sys.executable, "-m", "artisan_submitit.srun_worker", str(tmp_path)],
-        env=environment,
-        cwd=tmp_path,
-        capture_output=True,
-        timeout=30,
-        check=False,
-    )
-
-    assert completed.returncode == 0, completed.stderr.decode()
-    outcome = read_worker_outcome(tmp_path)
-    assert outcome.cancellation_acknowledgement is None
-    assert outcome.results[0].success, outcome.results[0].error
-    assert (tmp_path / trusted).exists()
-    assert not (tmp_path / ambient).exists()
-    records = list(Path(runtime.staging_root).rglob("executions.parquet"))
-    assert len(records) == 1
-    assert pl.read_parquet(records[0]).item(0, "source_worker") == 7
-    assert runtime.worker_id == 42
-
-
-def test_real_worker_records_managed_command(tmp_path: Path) -> None:
-    runtime = _runtime(tmp_path)
-    unit = ExecutionUnit(
-        operation=StreamingEcho(params=StreamingEcho.Params(seconds=1)),
-        inputs={},
-        step_number=0,
-    )
-    environment = _prepare_real_worker(tmp_path, unit, runtime)
-    completed = subprocess.run(
-        [sys.executable, "-m", "artisan_submitit.srun_worker", str(tmp_path)],
-        env=environment,
-        cwd=tmp_path,
-        capture_output=True,
-        timeout=30,
-        check=False,
-    )
-    assert completed.returncode == 0, completed.stderr.decode()
-    outcome = read_worker_outcome(tmp_path)
-    assert outcome.results[0].success, outcome.results[0].error
-    record = next(Path(runtime.staging_root).rglob("executions.parquet"))
-    row = pl.read_parquet(record).row(0, named=True)
-    assert json.loads(row["command_recording"])["commands"]
-    assert "streaming_echo line 1 / 1" in row["tool_output"]
-
-
-@pytest.mark.parametrize("operation", [ObservedWait, ObservedCommand])
-def test_real_worker_cancellation_closes_native_work(
-    tmp_path: Path, operation: type[Wait]
-) -> None:
-    runtime = _runtime(tmp_path)
-    unit = ExecutionUnit(
-        operation=operation(params=operation.Params(duration=60)),
-        inputs={},
-        step_number=0,
-        step_run_id="worker_cancellation",
-    )
-    environment = _prepare_real_worker(tmp_path, unit, runtime)
-    marker = tmp_path / "started"
-    environment["ARTISAN_SUBMITIT_TEST_MARKER"] = str(marker)
-    process = subprocess.Popen(
-        [sys.executable, "-m", "artisan_submitit.srun_worker", str(tmp_path)],
-        env=environment,
-        cwd=tmp_path,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
-    try:
-        deadline = time.monotonic() + 15
-        while (
-            not marker.exists()
-            and process.poll() is None
-            and time.monotonic() < deadline
-        ):
-            time.sleep(0.05)
-        assert marker.exists(), process.communicate(timeout=1)
-        work_pid = int(marker.read_text())
-        (tmp_path / "cancel").touch()
-        stdout, stderr = process.communicate(timeout=15)
-        assert process.returncode == 0, (stdout, stderr)
-        outcome = read_worker_outcome(tmp_path)
-        assert (
-            outcome.cancellation_acknowledgement.status == CancellationStatus.CONFIRMED
-        )
-        with pytest.raises(ProcessLookupError):
-            os.kill(work_pid, 0)
-        assert len(outcome.results) == 1
-        assert not outcome.results[0].success
-    finally:
-        (tmp_path / "cancel").touch()
-        if process.poll() is None:
-            process.kill()
-            process.communicate(timeout=5)
+    assert (request.working_root / request.pack_id / ("b" * 32)).is_dir()

@@ -1,36 +1,55 @@
 #!/usr/bin/env python
-"""Cancel a SLURM-backed Artisan pipeline with Ctrl+C."""
+"""Submit an owned scheduler worker and request cancellation with Ctrl+C."""
 
 from __future__ import annotations
 
-import os
+import argparse
 from pathlib import Path
 
 from artisan.operations.examples import Wait
 from artisan.orchestration import PipelineManager
+from artisan.schemas import Environment
 
 from artisan_submitit import SlurmRunner
 
 
 def main() -> None:
-    """Submit slow work and rely on exact-handle cancellation."""
-    root = Path(".artisan-slurm-cancel-demo").resolve()
-    pipeline = PipelineManager.create(
-        name="cancel_demo_slurm",
-        delta_root=str(root / "delta"),
-        staging_root=str(root / "staging"),
-        working_root=str(root / "working"),
+    """Use the pipeline signal owner and retain any unresolved cleanup evidence."""
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--manifest", type=Path, required=True)
+    parser.add_argument("--environment", default="worker")
+    parser.add_argument("--cache-root", type=Path, required=True)
+    parser.add_argument("--root", type=Path, required=True)
+    parser.add_argument("--partition", default="cpu")
+    parser.add_argument("--prepare", action="store_true")
+    args = parser.parse_args()
+    root = args.root.resolve()
+    runner = SlurmRunner(
+        environment=Environment.from_pixi(
+            args.manifest.resolve(), name=args.environment
+        ),
+        cache_root=args.cache_root.resolve(),
+        log_folder=root / "scheduler",
+        slurm_partition=args.partition,
     )
-    runner = SlurmRunner(slurm_partition=os.environ.get("SLURM_TEST_PARTITION", "cpu"))
-    for index in range(6):
+    if args.prepare:
+        runner.prepare(Wait)
+    with PipelineManager.create(
+        "cancel_demo",
+        str(root / "delta"),
+        str(root / "staging"),
+        working_root=str(root / "working"),
+        default_step_runner=runner,
+    ) as pipeline:
         pipeline.submit(
             Wait,
-            name=f"wait_{index}",
             params={"duration": 60},
-            step_runner=runner,
+            runner_resources={"cpus": 1, "memory_gb": 1, "time_limit": "00:02:00"},
         )
-    print("Press Ctrl+C to request pipeline cancellation.")
-    print(pipeline.finalize())
+        print(
+            "Press Ctrl+C to request cancellation; cleanup uncertainty remains UNKNOWN."
+        )
+        print(pipeline.finalize())
 
 
 if __name__ == "__main__":

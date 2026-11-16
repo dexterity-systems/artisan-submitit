@@ -1,35 +1,37 @@
-# Migration from Prefect-backed SLURM execution
+# Migrating to prepared worker execution
 
-`artisan-submitit` preserves scheduler behavior but does not preserve Prefect's
-API. Migrate concepts rather than constructor calls:
+Use matching current Artisan and `artisan-submitit` packages and a fresh store.
+This release has no old-store conversion or compatibility runner aliases.
 
-| Previous concept | Native Artisan replacement |
+| Removed contract | Current contract |
 | --- | --- |
-| `SlurmTaskRunner` on a Prefect flow | `SlurmRunner` passed to Artisan |
-| Prefect `.map()` | Artisan execution units and `BatchStrategy` |
-| `units_per_worker` on the task runner | `BatchStrategy.units_per_worker` |
-| Prefect task states | `UnitResult` and Artisan execution records |
-| Prefect server/UI | Artisan run history, inspection, and failure logs |
-| `execution_mode="srun"` | `SlurmIntraRunner` |
+| Runner enums or provider strings | Import and pass `SlurmRunner` or `SlurmIntraRunner` instances |
+| Implicit host interpreter/operation endpoint | Explicit `Environment.from_pixi(...)`, then `runner.prepare(...)` |
+| Lifecycle router construction | The pipeline owns admitted handles and worker owners |
+| Submitit arrays, array limits and waves | One submission per worker pack; core `units_per_worker` and `max_workers` |
+| Free-form runner keyword options | Validated `parameters` mapping and typed `runner_resources` |
+| `slurm_gres` overriding GPU counts | Typed `gpus` plus current scheduled GPU measurement |
+| Worker log fields on execution rows | Public failure/log and command inspection readers |
 
-The new runner uses Submitit-native parameter names. Configure portable CPU,
-memory, GPU, and time requirements through `RunnerResources`; keep only genuine
-scheduler options in `SlurmRunner(...)` or `RunnerResources.extra`.
+Prepared environment records now identify declared software and completed
+preparation rather than an inventory of all installed files. Prepare existing
+environments once with the matching new core/provider versions; old prepared
+records are not reused. This change does not require another fresh store if you
+already use the retained store format. Operations and pipelines share the new
+prepared targets, and normal execution does not audit arbitrary in-place edits
+to installed packages.
 
-The old implementation cancelled by job name in Artisan core. The provider
-stores exact Submitit jobs and `Popen` values, so cancellation cannot affect an
-unrelated run with the same operation or step name.
+Operations and composites share `pipeline.run(operation, ...)` and
+`pipeline.submit(operation, ...)`. Top-level curators run in the selected worker.
+When preparing through a curator, pass its actual instance to `prepare_curator`.
+Preserve trusted explicit application registration modules through preparation
+and pipeline creation.
 
-## Artisan 0.2.0 development stores and APIs
+Resuming requires the configured provider instance. Stored names do not authorize
+imports or reconstruct scheduler settings. The run appends new steps and keeps
+its previous failed attempts visible. Unresolved ownership blocks resume.
 
-Start with a fresh format-7 store and use Artisan 0.2.0.dev0 or newer. This release
-does not provide old-store migration or backward-compatibility shims. Import
-`SlurmRunner` or `SlurmIntraRunner` directly from `artisan_submitit` and pass an
-instance to `PipelineManager` or an individual step.
-
-Cancellation now returns typed evidence. `CONFIRMED` means required worker and
-transport ownership closed; `UNKNOWN` means cleanup could not be proved and the
-step fails. Read worker logs through Artisan's public
-`artisan.visualization.inspect_worker_log` rather than an execution-row
-`worker_log` field. See [queue execution](slurm.md) and
-[intra-allocation execution](srun.md) for current cancellation behavior.
+`UNKNOWN` is an ownership result, not permission to retry. An accepted unit
+receipt, a finished scheduler job and a closed shared worker are distinct facts.
+See [queue ownership](slurm.md#ownership-evidence) and [intra-allocation
+cleanup](srun.md) before adapting cancellation code.

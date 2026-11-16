@@ -1,0 +1,41 @@
+services:
+  slurm:
+    image: ${QUALIFICATION_IMAGE:?set the prepared immutable image ID}
+    container_name: ${QUALIFICATION_CONTAINER:?set a unique job container name}
+    hostname: artisan-scheduler-qualification
+    entrypoint: [/bin/bash, /provider/docker/qualification-entrypoint.sh]
+    working_dir: /qualification
+    read_only: true
+    init: true
+    cpus: 4
+    mem_limit: 8g
+    memswap_limit: 8g
+    pids_limit: 512
+    environment:
+      PYTHONDONTWRITEBYTECODE: "1"
+    volumes:
+      - ..:/provider:ro
+      - ${QUALIFICATION_ROOT:?set a disposable job directory}/work:/qualification
+      - ${QUALIFICATION_ROOT}/config:/qualification-config:ro
+      - ${QUALIFICATION_ROOT}/config/passwd:/etc/passwd:ro
+      - ${QUALIFICATION_ROOT}/config/group:/etc/group:ro
+    tmpfs:
+      - /run:rw,size=64m,mode=0755
+      - /tmp:rw,size=512m,mode=1777
+      - /var/log:rw,size=64m,mode=0777
+      - /var/lib/mysql:rw,size=512m,mode=0755
+      - /var/lib/munge:rw,size=16m,mode=0755
+      - /etc/munge:rw,size=16m,mode=0755
+      - /etc/slurm:rw,size=16m,mode=0755
+      - /var/spool/slurmctld:rw,size=64m,mode=0755
+      - /var/spool/slurmd:rw,size=64m,mode=0755,exec
+      - /home/qualification:rw,size=128m,mode=0755,uid=${QUALIFICATION_UID},gid=${QUALIFICATION_GID}
+    healthcheck:
+      test:
+        [
+          CMD-SHELL,
+          "test -f /run/artisan-qualification-ready && /usr/bin/squeue --noheader",
+        ]
+      interval: 2s
+      timeout: 5s
+      retries: 60
